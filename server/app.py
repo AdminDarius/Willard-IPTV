@@ -357,7 +357,7 @@ def download_m3u(playlist_id, source, progress_callback=None):
             }
         )
 
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=120) as response:
             final_url = urlsplit(response.geturl())
             if final_url.scheme not in ("http", "https") or not final_url.hostname:
                 return False, "Endereço de redirecionamento inválido.", None

@@ -282,6 +282,12 @@
       data.source_url = document.getElementById("m3u-url").value.trim();
     }
 
+    const btn = document.getElementById("add-playlist");
+    const originalText = btn.textContent;
+    btn.textContent = "Baixando lista... aguarde";
+    btn.disabled = true;
+    showMessage("Processando playlist, isso pode levar até 2 minutos...", false);
+
     try {
       await apiRequest("/api/playlists", {
         method: "POST",
@@ -296,6 +302,9 @@
       await loadPlaylists();
     } catch (error) {
       showMessage(error.message, true);
+    } finally {
+      btn.textContent = originalText;
+      btn.disabled = false;
     }
   }
 
@@ -370,6 +379,9 @@
       await loadPlaylists();
     } catch (error) {
       showMessage(error.message, true);
+    } finally {
+      btn.textContent = originalText;
+      btn.disabled = false;
     }
   }
 
