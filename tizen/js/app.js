@@ -265,7 +265,8 @@
 
   async function addPlaylist() {
     const name = document.getElementById("playlist-name").value.trim();
-    const type = document.getElementById("playlist-type").value;
+    let type = document.getElementById("playlist-type").value;
+    if (type === "m3u") type = "m3u_url";
 
     if (!name) {
       showMessage("Informe um nome para a playlist.", true);
