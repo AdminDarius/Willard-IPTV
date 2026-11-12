@@ -7,7 +7,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from pathlib import Path
-from flask import Flask, request, jsonify, render_template_string, Response, stream_with_context
+from flask import send_from_directory, Flask, request, jsonify, render_template_string, Response, stream_with_context
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -1326,6 +1326,17 @@ def api_catalog_item_proxy(item_id):
 
 
 initialize()
+
+
+@app.route('/')
+@app.route('/<path:path>')
+def serve_frontend(path='index.html'):
+    if path == '' or path == '/':
+        path = 'index.html'
+    
+    # A pasta tizen está um nível acima da pasta server
+    tizen_dir = BASE.parent / 'tizen'
+    return send_from_directory(tizen_dir, path)
 
 if __name__ == "__main__":
     print("\\n===== WILLARD IPTV SERVER =====")
