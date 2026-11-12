@@ -1342,6 +1342,14 @@ if __name__ == "__main__":
     print("\\n===== WILLARD IPTV SERVER =====")
     print("Painel: http://0.0.0.0:8767")
     print("Autenticação: desativada.")
+
+@app.route('/tizen/')
+@app.route('/tizen/<path:path>')
+def serve_tizen(path='index.html'):
+    from flask import send_from_directory
+    tizen_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tizen')
+    return send_from_directory(tizen_dir, path)
+
     app.run(host="0.0.0.0", port=8767, debug=False)
 
 
