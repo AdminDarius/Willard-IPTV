@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Willard IPTV">
+  <title>Willard IPTV</title>
+  <link rel="stylesheet" href="css/willard.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-symbol">W</div>
+        <span>WILLARD</span>
+        <small>IPTV</small>
+      </div>
+
+      <nav id="navigation" aria-label="Menu principal">
+        <button class="nav-item active" data-page="home">
+          <span class="nav-icon">⌂</span><span>Início</span>
+        </button>
+        <button class="nav-item" data-page="live">
+          <span class="nav-icon">▣</span><span>TV ao vivo</span>
+        </button>
+        <button class="nav-item" data-page="movies">
+          <span class="nav-icon">▷</span><span>Filmes</span>
+        </button>
+        <button class="nav-item" data-page="series">
+          <span class="nav-icon">▤</span><span>Séries</span>
+        </button>
+        <button class="nav-item" data-page="playlists">
+          <span class="nav-icon">☷</span><span>Listas</span>
+        </button>
+      </nav>
+
+      <nav id="live-category-nav" class="live-category-nav" aria-label="Categorias" hidden></nav>
+      <div class="sidebar-footer">WILLARD IPTV</div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="page-label" id="page-label">INÍCIO</div>
+        <div class="profile">
+          <span class="status-dot"></span>
+          <span>Central de entretenimento</span>
+        </div>
+      </header>
+
+      <section class="hero" id="hero">
+        <div class="hero-content">
+          <span class="eyebrow">SEU ENTRETENIMENTO</span>
+          <h1>Seu entretenimento<br>em um só lugar.</h1>
+          <p>Seja bem-vindo ao Willard IPTV.</p>
+          <button class="primary-button" id="start-button">
+            Explorar conteúdo <span>›</span>
+          </button>
+        </div>
+        <div class="hero-decoration">
+          <div class="hero-orbit orbit-one"></div>
+          <div class="hero-orbit orbit-two"></div>
+          <div class="hero-letter">W</div>
+        </div>
+      </section>
+
+      <section class="content-section">
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">SUA PROGRAMAÇÃO</span>
+            <h2 id="section-title">Continue assistindo</h2>
+          </div>
+          <span class="section-note" id="section-note">WILLARD IPTV</span>
+        </div>
+
+        <div class="content-row" id="content-row">
+          <button class="content-card" data-index="0">
+            <div class="card-art art-one"><span>▶</span></div>
+            <div class="card-title">TV ao vivo</div>
+            <div class="card-subtitle">Seus canais</div>
+          </button>
+          <button class="content-card" data-index="1">
+            <div class="card-art art-two"><span>▣</span></div>
+            <div class="card-title">Filmes</div>
+            <div class="card-subtitle">Explore o catálogo</div>
+          </button>
+          <button class="content-card" data-index="2">
+            <div class="card-art art-three"><span>▤</span></div>
+            <div class="card-title">Séries</div>
+            <div class="card-subtitle">Continue sua história</div>
+          </button>
+          <button class="content-card" data-index="3">
+            <div class="card-art art-four"><span>☷</span></div>
+            <div class="card-title">Minhas listas</div>
+            <div class="card-subtitle">Gerencie suas playlists</div>
+          </button>
+        </div>
+      </section>
+
+      <div class="bottom-hint">
+        <span><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> Navegar</span>
+        <span><kbd>OK</kbd> Selecionar</span>
+        <span><kbd>BACK</kbd> Voltar</span>
+      </div>
+    </main>
+  </div>
+
+  <script src="$WEBAPIS/webapis/webapis.js"></script>
+  <script src="js/player/mpegts.min.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

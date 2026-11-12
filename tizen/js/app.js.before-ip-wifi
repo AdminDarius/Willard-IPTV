@@ -1,0 +1,618 @@
+(function () {
+  "use strict";
+
+  const API_KEY = "willard_server_url";
+  const DEFAULT_API = "http://192.168.0.3:8767";
+  const navItems = Array.from(document.querySelectorAll(".nav-item"));
+  const cards = Array.from(document.querySelectorAll(".content-card"));
+  const pageLabel = document.getElementById("page-label");
+  const sectionTitle = document.getElementById("section-title");
+  const startButton = document.getElementById("start-button");
+  const hero = document.getElementById("hero");
+  const contentSection = document.querySelector(".content-section");
+  const bottomHint = document.querySelector(".bottom-hint");
+
+  let apiUrl = localStorage.getItem(API_KEY) || DEFAULT_API;
+  let activePage = "home";
+  let playlists = [];
+
+  const pages = {
+    home: ["INÍCIO", "Continue assistindo"],
+    live: ["TV AO VIVO", "Canais ao vivo"],
+    movies: ["FILMES", "Explore os filmes"],
+    series: ["SÉRIES", "Suas séries"],
+    playlists: ["LISTAS", "Minhas listas"]
+  };
+
+  const main = document.querySelector(".main-content");
+  const view = document.createElement("section");
+  view.id = "dynamic-view";
+  view.className = "dynamic-view";
+  view.hidden = true;
+  main.appendChild(view);
+
+  function escapeHTML(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, function (c) {
+      return {
+        "&": "&amp;", "<": "&lt;", ">": "&gt;",
+        '"': "&quot;", "'": "&#39;"
+      }[c];
+    });
+  }
+
+  function showMessage(message, error) {
+    const status = document.getElementById("playlist-status");
+    if (!status) return;
+    status.textContent = message;
+    status.className = "playlist-status" + (error ? " error" : "");
+  }
+
+  async function apiRequest(path, options) {
+    const response = await fetch(apiUrl.replace(/\/+$/, "") + path, Object.assign({
+      headers: { "Content-Type": "application/json" }
+    }, options || {}));
+
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (_) {}
+
+    if (!response.ok) {
+      throw new Error(data.error || data.message || "Erro na comunicação com o servidor.");
+    }
+    return data;
+  }
+
+  function renderPlaylistPage() {
+    view.innerHTML = `
+      <div class="playlist-toolbar">
+        <div>
+          <span class="section-kicker">GERENCIAMENTO</span>
+          <h2>Minhas listas</h2>
+          <p>Gerencie suas fontes de conteúdo.</p>
+        </div>
+        <button class="secondary-button" id="refresh-playlists">Atualizar</button>
+      </div>
+
+      <div class="server-panel">
+        <label for="server-address">Endereço do servidor Willard</label>
+        <div class="server-controls">
+          <input id="server-address" type="url"
+            value="${escapeHTML(apiUrl)}"
+            placeholder="http://192.168.0.3:8767">
+          <button class="secondary-button" id="save-server">Conectar</button>
+        </div>
+        <div id="playlist-status" class="playlist-status">Aguardando conexão.</div>
+      </div>
+
+      <div class="playlist-form-panel">
+        <h3>Adicionar playlist</h3>
+        <label for="playlist-name">Nome da lista</label>
+        <input id="playlist-name" type="text" placeholder="Ex.: Minha programação">
+
+        <label for="playlist-type">Tipo de conexão</label>
+        <select id="playlist-type">
+          <option value="xtream">Xtream Codes</option>
+          <option value="m3u_url">URL M3U</option>
+        </select>
+
+        <div id="xtream-fields">
+          <label for="xtream-server">Servidor</label>
+          <input id="xtream-server" type="url" placeholder="http://servidor:porta">
+          <label for="xtream-user">Usuário</label>
+          <input id="xtream-user" type="text" placeholder="Usuário">
+          <label for="xtream-password">Senha</label>
+          <input id="xtream-password" type="password" placeholder="Senha">
+        </div>
+
+        <div id="m3u-fields" hidden>
+          <label for="m3u-url">Endereço da playlist M3U</label>
+          <input id="m3u-url" type="url" placeholder="https://servidor/lista.m3u">
+        </div>
+
+        <button class="primary-button" id="add-playlist">Adicionar lista</button>
+      </div>
+
+      <div class="playlist-list-panel">
+        <h3>Playlists cadastradas</h3>
+        <div id="playlist-items" class="playlist-items">
+          <p>Carregando listas...</p>
+        </div>
+      </div>
+    `;
+
+    document.getElementById("playlist-type").addEventListener("change", function () {
+      const xtream = this.value === "xtream";
+      document.getElementById("xtream-fields").hidden = !xtream;
+      document.getElementById("m3u-fields").hidden = xtream;
+    });
+
+    document.getElementById("save-server").addEventListener("click", async function () {
+      const value = document.getElementById("server-address").value.trim().replace(/\/+$/, "");
+      if (!/^https?:\/\/.+/i.test(value)) {
+        showMessage("Informe um endereço HTTP ou HTTPS válido.", true);
+        return;
+      }
+      apiUrl = value;
+      localStorage.setItem(API_KEY, apiUrl);
+      await loadPlaylists();
+    });
+
+    document.getElementById("refresh-playlists").addEventListener("click", loadPlaylists);
+    document.getElementById("add-playlist").addEventListener("click", addPlaylist);
+
+    loadPlaylists();
+  }
+
+  async function loadPlaylists() {
+    const list = document.getElementById("playlist-items");
+    if (list) list.innerHTML = "<p>Conectando ao servidor...</p>";
+
+    try {
+      const health = await apiRequest("/api/health");
+      const result = await apiRequest("/api/playlists");
+      playlists = result.playlists || [];
+      showMessage(health.status === "online" ? "Servidor conectado." : "Servidor respondeu.", false);
+      renderPlaylistItems();
+    } catch (error) {
+      playlists = [];
+      if (list) list.innerHTML = "<p class='empty-message'>Não foi possível carregar as listas.</p>";
+      showMessage(error.message, true);
+    }
+  }
+
+  function renderPlaylistItems() {
+    const list = document.getElementById("playlist-items");
+    if (!list) return;
+
+    if (!playlists.length) {
+      list.innerHTML = "<p class='empty-message'>Nenhuma playlist cadastrada.</p>";
+      return;
+    }
+
+    list.innerHTML = playlists.map(function (item) {
+      const isDefault = Number(item.is_default) === 1;
+      const type = item.playlist_type === "xtream" ? "Xtream Codes" : "M3U";
+      return `
+        <article class="playlist-item">
+          <div class="playlist-info">
+            <strong>${escapeHTML(item.name)}</strong>
+            <span>${type} · ${isDefault ? "Lista padrão" : "Disponível"}</span>
+          </div>
+          <div class="playlist-actions">
+            ${isDefault ? "<span class='default-label'>SELECIONADA</span>" :
+              `<button class="small-button" data-action="select" data-id="${Number(item.id)}">Selecionar lista</button>`}
+            <button class="small-button danger-button" data-action="delete" data-id="${Number(item.id)}">Excluir</button>
+          </div>
+        </article>
+      `;
+    }).join("");
+
+    list.querySelectorAll("button[data-action]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        const id = Number(this.dataset.id);
+        if (this.dataset.action === "select") selectPlaylist(id);
+        if (this.dataset.action === "delete") deletePlaylist(id);
+      });
+    });
+  }
+
+  async function addPlaylist() {
+    const name = document.getElementById("playlist-name").value.trim();
+    const type = document.getElementById("playlist-type").value;
+
+    if (!name) {
+      showMessage("Informe um nome para a playlist.", true);
+      return;
+    }
+
+    const data = { name: name, playlist_type: type };
+
+    if (type === "xtream") {
+      data.server_url = document.getElementById("xtream-server").value.trim();
+      data.username = document.getElementById("xtream-user").value.trim();
+      data.password = document.getElementById("xtream-password").value;
+    } else {
+      data.source_url = document.getElementById("m3u-url").value.trim();
+    }
+
+    try {
+      await apiRequest("/api/playlists", {
+        method: "POST",
+        body: JSON.stringify(data)
+      });
+      document.getElementById("playlist-name").value = "";
+      document.getElementById("xtream-server").value = "";
+      document.getElementById("xtream-user").value = "";
+      document.getElementById("xtream-password").value = "";
+      document.getElementById("m3u-url").value = "";
+      showMessage("Playlist cadastrada com sucesso.", false);
+      await loadPlaylists();
+    } catch (error) {
+      showMessage(error.message, true);
+    }
+  }
+
+  async function selectPlaylist(id) {
+    const buttons = Array.from(
+      document.querySelectorAll('button[data-action="select"]')
+    );
+    buttons.forEach(button => button.disabled = true);
+    showMessage("Baixando e validando a playlist...", false);
+
+    try {
+      const result = await apiRequest(
+        "/api/playlists/" + id + "/select",
+        { method: "PUT" }
+      );
+      showMessage(result.message || "Playlist selecionada com sucesso.", false);
+      await loadPlaylists();
+    } catch (error) {
+      showMessage(error.message, true);
+      buttons.forEach(button => button.disabled = false);
+    }
+  }
+
+  async function deletePlaylist(id) {
+    if (!confirm("Deseja realmente excluir esta playlist?")) return;
+
+    try {
+      await apiRequest("/api/playlists/" + id, { method: "DELETE" });
+      showMessage("Playlist excluída.", false);
+      await loadPlaylists();
+    } catch (error) {
+      showMessage(error.message, true);
+    }
+  }
+
+
+  let catalogViewToken = 0;
+  let catalogPollTimer = null;
+
+  function catalogHeader(page) {
+    return `
+      <div class="catalog-header">
+        <span class="section-kicker">WILLARD IPTV</span>
+        <h2>${escapeHTML(pages[page][1])}</h2>
+        <p>Escolha uma categoria para explorar seu conteúdo.</p>
+      </div>
+    `;
+  }
+
+  function renderCatalogLoading(message, progress) {
+    const percent = Math.max(0, Math.min(100, Number(progress) || 0));
+    view.innerHTML = `
+      <div class="catalog-state">
+        <span class="section-kicker">PREPARANDO CATÁLOGO</span>
+        <h2>${escapeHTML(message)}</h2>
+        <div class="catalog-progress">
+          <div style="width:${percent}%"></div>
+        </div>
+        <p>${percent}% concluído</p>
+      </div>
+    `;
+  }
+
+  function renderCatalogError(message) {
+    view.innerHTML = `
+      <div class="catalog-state">
+        <span class="section-kicker">CATÁLOGO</span>
+        <h2>Não foi possível carregar o conteúdo</h2>
+        <p>${escapeHTML(message)}</p>
+        <button class="secondary-button" id="catalog-retry">Tentar novamente</button>
+      </div>
+    `;
+    document.getElementById("catalog-retry").addEventListener("click", function () {
+      loadCatalogPage(activePage);
+    });
+  }
+
+  async function loadCatalogPage(page) {
+    const token = ++catalogViewToken;
+
+    if (catalogPollTimer) {
+      clearTimeout(catalogPollTimer);
+      catalogPollTimer = null;
+    }
+
+    view.innerHTML = `
+      <div class="catalog-state">
+        <span class="section-kicker">WILLARD IPTV</span>
+        <h2>Conectando ao catálogo...</h2>
+      </div>
+    `;
+
+    try {
+      let status = await apiRequest("/api/catalog/status");
+      if (token !== catalogViewToken) return;
+
+      if (status.status === "not_started") {
+        status = await apiRequest("/api/catalog/index", { method: "POST" });
+      }
+
+      if (token !== catalogViewToken) return;
+
+      if (status.status === "indexing") {
+        renderCatalogLoading("Indexando sua playlist...", status.progress);
+        catalogPollTimer = setTimeout(function () {
+          pollCatalogStatus(page, token);
+        }, 1200);
+        return;
+      }
+
+      if (status.status === "error") {
+        renderCatalogError(status.message || "Falha na indexação.");
+        return;
+      }
+
+      if (status.status === "ready") {
+        await renderCatalogCategories(page, token);
+        return;
+      }
+
+      renderCatalogError(status.message || "Catálogo indisponível.");
+    } catch (error) {
+      if (token === catalogViewToken) renderCatalogError(error.message);
+    }
+  }
+
+  async function pollCatalogStatus(page, token) {
+    if (token !== catalogViewToken || activePage !== page) return;
+
+    try {
+      const status = await apiRequest("/api/catalog/status");
+      if (token !== catalogViewToken) return;
+
+      if (status.status === "indexing") {
+        renderCatalogLoading("Indexando sua playlist...", status.progress);
+        catalogPollTimer = setTimeout(function () {
+          pollCatalogStatus(page, token);
+        }, 1200);
+      } else if (status.status === "ready") {
+        await renderCatalogCategories(page, token);
+      } else {
+        renderCatalogError(status.message || "Não foi possível indexar a playlist.");
+      }
+    } catch (error) {
+      if (token === catalogViewToken) renderCatalogError(error.message);
+    }
+  }
+
+  async function renderCatalogCategories(page, token) {
+    try {
+      const result = await apiRequest(
+        "/api/catalog/categories?type=" + encodeURIComponent(page === "live" ? "live" : page)
+      );
+
+      if (token !== catalogViewToken) return;
+
+      const categories = result.categories || [];
+
+      view.innerHTML = `
+        ${catalogHeader(page)}
+        <div class="catalog-category-heading">
+          <h3>Categorias</h3>
+          <span>${categories.length} categorias</span>
+        </div>
+        <div class="catalog-categories" id="catalog-categories">
+          ${categories.length ? categories.map(function (category) {
+            const name = String(category.category || "Outros");
+            const count = Number(category.item_count) || 0;
+            const adult = page === "movies" && name === "Adultos";
+            return `
+              <button class="catalog-category${adult ? " adult-category" : ""}"
+                data-category="${escapeHTML(name)}">
+                <strong>${escapeHTML(name)}</strong>
+                <span>${count.toLocaleString("pt-BR")} itens</span>
+              </button>
+            `;
+          }).join("") : "<p class='empty-message'>Nenhuma categoria encontrada.</p>"}
+        </div>
+        <div id="catalog-results" class="catalog-results">
+          <p class="catalog-placeholder">Selecione uma categoria para visualizar os conteúdos.</p>
+        </div>
+      `;
+
+      view.querySelectorAll(".catalog-category").forEach(function (button) {
+        button.addEventListener("click", function () {
+          loadCatalogItems(page, this.dataset.category, 1);
+        });
+      });
+    } catch (error) {
+      if (token === catalogViewToken) renderCatalogError(error.message);
+    }
+  }
+
+  async function loadCatalogItems(page, category, pageNumber) {
+    const token = ++catalogViewToken;
+    const results = document.getElementById("catalog-results");
+    if (!results) return;
+
+    view.querySelectorAll(".catalog-category").forEach(function (button) {
+      button.classList.toggle("selected", button.dataset.category === category);
+    });
+
+    results.innerHTML = "<p class='catalog-placeholder'>Carregando conteúdo...</p>";
+
+    try {
+      const type = page === "live" ? "live" : page;
+      const query = "?type=" + encodeURIComponent(type)
+        + "&category=" + encodeURIComponent(category)
+        + "&page=" + pageNumber + "&limit=40";
+
+      const result = await apiRequest("/api/catalog/items" + query);
+      if (token !== catalogViewToken || activePage !== page) return;
+
+      const items = result.items || [];
+      const first = items.length ? (pageNumber - 1) * result.limit + 1 : 0;
+      const last = first + items.length - 1;
+
+      results.innerHTML = `
+        <div class="catalog-results-heading">
+          <div>
+            <span class="section-kicker">CATEGORIA</span>
+            <h3>${escapeHTML(category)}</h3>
+          </div>
+          <span>${Number(result.total).toLocaleString("pt-BR")} itens</span>
+        </div>
+        <div class="catalog-item-list">
+          ${items.length ? items.map(function (item, index) {
+            return `
+              <article class="catalog-item">
+                <span class="catalog-item-number">${first + index}</span>
+                <div class="catalog-item-info">
+                  <strong>${escapeHTML(item.title)}</strong>
+                  <span>${escapeHTML(category)}</span>
+                </div>
+              </article>
+            `;
+          }).join("") : "<p class='empty-message'>Nenhum conteúdo nesta categoria.</p>"}
+        </div>
+        <div class="catalog-pagination">
+          <span>${first}–${last} de ${Number(result.total).toLocaleString("pt-BR")}</span>
+          <div>
+            <button class="small-button" id="catalog-prev"
+              ${pageNumber <= 1 ? "disabled" : ""}>Anterior</button>
+            <span>Página ${result.page} de ${result.pages}</span>
+            <button class="small-button" id="catalog-next"
+              ${pageNumber >= result.pages ? "disabled" : ""}>Próxima</button>
+          </div>
+        </div>
+      `;
+
+      const previous = document.getElementById("catalog-prev");
+      const next = document.getElementById("catalog-next");
+
+      previous.addEventListener("click", function () {
+        loadCatalogItems(page, category, pageNumber - 1);
+      });
+      next.addEventListener("click", function () {
+        loadCatalogItems(page, category, pageNumber + 1);
+      });
+
+    } catch (error) {
+      if (token === catalogViewToken) {
+        results.innerHTML = `<p class="empty-message">${escapeHTML(error.message)}</p>`;
+      }
+    }
+  }
+
+  function openPage(page) {
+    if (!pages[page]) return;
+
+    activePage = page;
+    pageLabel.textContent = pages[page][0];
+    sectionTitle.textContent = pages[page][1];
+
+    navItems.forEach(function (item) {
+      const selected = item.dataset.page === page;
+      item.classList.toggle("active", selected);
+      item.setAttribute("aria-current", selected ? "page" : "false");
+    });
+
+    const isHome = page === "home";
+    hero.hidden = !isHome;
+    contentSection.hidden = !isHome;
+    view.hidden = isHome;
+
+    if (page === "playlists") {
+      catalogViewToken++;
+      if (catalogPollTimer) clearTimeout(catalogPollTimer);
+      renderPlaylistPage();
+    }
+
+    if (page === "live" || page === "movies" || page === "series") {
+      loadCatalogPage(page);
+    }
+
+    if (isHome) {
+      catalogViewToken++;
+      if (catalogPollTimer) clearTimeout(catalogPollTimer);
+    }
+  }
+
+  function activateCard(index) {
+    const destinations = ["live", "movies", "series", "playlists"];
+    if (destinations[index]) {
+      openPage(destinations[index]);
+      const selected = navItems.find(function (item) {
+        return item.dataset.page === destinations[index];
+      });
+      if (selected) selected.focus();
+    }
+  }
+
+  navItems.forEach(function (item) {
+    item.addEventListener("click", function () {
+      openPage(item.dataset.page);
+    });
+  });
+
+  cards.forEach(function (card) {
+    card.addEventListener("click", function () {
+      activateCard(Number(card.dataset.index));
+    });
+  });
+
+  startButton.addEventListener("click", function () {
+    openPage("live");
+    navItems[1].focus();
+  });
+
+  function focusables() {
+    if (activePage === "home") {
+      return navItems.concat(cards, [startButton]);
+    }
+
+    return navItems.concat(Array.from(view.querySelectorAll(
+      "button:not(:disabled), input:not(:disabled), select:not(:disabled)"
+    )));
+  }
+
+  function moveFocus(key) {
+    const elements = focusables();
+    const current = elements.indexOf(document.activeElement);
+    if (current < 0) {
+      navItems[0].focus();
+      return;
+    }
+    let next = current;
+    if (key === "ArrowDown" || key === "ArrowRight") {
+      next = Math.min(current + 1, elements.length - 1);
+    } else if (key === "ArrowUp" || key === "ArrowLeft") {
+      next = Math.max(current - 1, 0);
+    }
+    elements[next].focus();
+  }
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp" ||
+        event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      if (activePage !== "home" && event.target.matches("input, select")) return;
+      event.preventDefault();
+      moveFocus(event.key);
+      return;
+    }
+
+    if (event.key === "Enter") {
+      const element = document.activeElement;
+      if (element && typeof element.click === "function" &&
+          !event.target.matches("input")) {
+        event.preventDefault();
+        element.click();
+      }
+      return;
+    }
+
+    if (event.key === "Escape" || event.key === "Backspace" ||
+        event.keyCode === 10009) {
+      event.preventDefault();
+      if (activePage !== "home") {
+        openPage("home");
+        navItems[0].focus();
+      }
+    }
+  });
+
+  navItems[0].focus();
+})();

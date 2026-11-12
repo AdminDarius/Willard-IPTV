@@ -1,0 +1,1870 @@
+(function () {
+  "use strict";
+
+  const API_KEY = "willard_server_url";
+  const DEFAULT_API = "http://127.0.0.1:8767";
+  const navItems = Array.from(document.querySelectorAll(".nav-item"));
+  const liveCategoryNav = document.getElementById("live-category-nav");
+  const navigation = document.getElementById("navigation");
+  const cards = Array.from(document.querySelectorAll(".content-card"));
+  const pageLabel = document.getElementById("page-label");
+  const sectionTitle = document.getElementById("section-title");
+  const startButton = document.getElementById("start-button");
+  const hero = document.getElementById("hero");
+  const contentSection = document.querySelector(".content-section");
+  const bottomHint = document.querySelector(".bottom-hint");
+
+  let apiUrl = localStorage.getItem(API_KEY) || DEFAULT_API;
+  let activePage = "home";
+  let playlists = [];
+  let playerOpen = false;
+  let playerMode = "";
+  let playerRequestToken = 0;
+  let playerReturnFocus = null;
+  let playerOverlay = null;
+  let playerVideo = null;
+  let playerDisplayMode = "";
+  let currentPlayerItemId = 0;
+  let playerFullscreenReturnFocus = null;
+  let homePreviewLoading = false;
+
+
+  const pages = {
+    home: ["INÍCIO", "Continue assistindo"],
+    live: ["TV AO VIVO", "Canais ao vivo"],
+    movies: ["FILMES", "Explore os filmes"],
+    series: ["SÉRIES", "Suas séries"],
+    playlists: ["LISTAS", "Minhas listas"]
+  };
+
+  const main = document.querySelector(".main-content");
+  const view = document.createElement("section");
+  view.id = "dynamic-view";
+  view.className = "dynamic-view";
+  view.hidden = true;
+  main.appendChild(view);
+
+  function escapeHTML(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, function (c) {
+      return {
+        "&": "&amp;", "<": "&lt;", ">": "&gt;",
+        '"': "&quot;", "'": "&#39;"
+      }[c];
+    });
+  }
+
+  function showMessage(message, error) {
+    const status = document.getElementById("playlist-status");
+    if (!status) return;
+    status.textContent = message;
+    status.className = "playlist-status" + (error ? " error" : "");
+  }
+
+  async function apiRequest(path, options) {
+    const response = await fetch(apiUrl.replace(/\/+$/, "") + path, Object.assign({
+      headers: { "Content-Type": "application/json" }
+    }, options || {}));
+
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (_) {}
+
+    if (!response.ok) {
+      throw new Error(data.error || data.message || "Erro na comunicação com o servidor.");
+    }
+    return data;
+  }
+
+  function renderPlaylistPage() {
+    view.innerHTML = `
+      <div class="playlist-toolbar">
+        <div>
+          <span class="section-kicker">GERENCIAMENTO</span>
+          <h2>Minhas listas</h2>
+          <p>Gerencie suas fontes de conteúdo.</p>
+        </div>
+        <button class="secondary-button" id="refresh-playlists">Atualizar</button>
+      </div>
+
+      <div class="server-panel">
+        <label for="server-address">Endereço do servidor Willard</label>
+        <div class="server-controls">
+          <input id="server-address" type="url"
+            value="${escapeHTML(apiUrl)}"
+            placeholder="http://192.168.0.7:8767">
+          <button class="secondary-button" id="save-server">Conectar</button>
+        </div>
+        <div id="playlist-status" class="playlist-status">Aguardando conexão.</div>
+      </div>
+
+      <div class="playlist-form-panel">
+        <h3>Adicionar playlist</h3>
+        <label for="playlist-name">Nome da lista</label>
+        <input id="playlist-name" type="text" placeholder="Ex.: Minha programação">
+
+        <label for="playlist-type">Tipo de conexão</label>
+        <select id="playlist-type">
+          <option value="xtream">Xtream Codes</option>
+          <option value="m3u_url">URL M3U</option>
+        </select>
+
+        <div id="xtream-fields">
+          <label for="xtream-server">Servidor</label>
+          <input id="xtream-server" type="url" placeholder="http://servidor:porta">
+          <label for="xtream-user">Usuário</label>
+          <input id="xtream-user" type="text" placeholder="Usuário">
+          <label for="xtream-password">Senha</label>
+          <input id="xtream-password" type="password" placeholder="Senha">
+        </div>
+
+        <div id="m3u-fields" hidden>
+          <label for="m3u-url">Endereço da playlist M3U</label>
+          <input id="m3u-url" type="url" placeholder="https://servidor/lista.m3u">
+        </div>
+
+        <button class="primary-button" id="add-playlist">Adicionar lista</button>
+      </div>
+
+      <div class="playlist-list-panel">
+        <h3>Playlists cadastradas</h3>
+        <div id="playlist-items" class="playlist-items">
+          <p>Carregando listas...</p>
+        </div>
+      </div>
+    `;
+
+    document.getElementById("playlist-type").addEventListener("change", function () {
+      const xtream = this.value === "xtream";
+      document.getElementById("xtream-fields").hidden = !xtream;
+      document.getElementById("m3u-fields").hidden = xtream;
+    });
+
+    document.getElementById("save-server").addEventListener("click", async function () {
+      const value = document.getElementById("server-address").value.trim().replace(/\/+$/, "");
+      if (!/^https?:\/\/.+/i.test(value)) {
+        showMessage("Informe um endereço HTTP ou HTTPS válido.", true);
+        return;
+      }
+      apiUrl = value;
+      localStorage.setItem(API_KEY, apiUrl);
+      await loadPlaylists();
+    });
+
+    document.getElementById("refresh-playlists").addEventListener("click", loadPlaylists);
+    document.getElementById("add-playlist").addEventListener("click", addPlaylist);
+
+    loadPlaylists();
+  }
+
+  async function loadPlaylists() {
+    const list = document.getElementById("playlist-items");
+    if (list) list.innerHTML = "<p>Conectando ao servidor...</p>";
+
+    try {
+      const health = await apiRequest("/api/health");
+      const result = await apiRequest("/api/playlists");
+      playlists = result.playlists || [];
+      showMessage(health.status === "online" ? "Servidor conectado." : "Servidor respondeu.", false);
+      renderPlaylistItems();
+      startHomePreview();
+    } catch (error) {
+      playlists = [];
+      if (list) list.innerHTML = "<p class='empty-message'>Não foi possível carregar as listas.</p>";
+      showMessage(error.message, true);
+    }
+  }
+
+  async function startHomePreview() {
+    if (homePreviewLoading || playerOpen || activePage !== "home" || !playlists.length) return;
+
+    homePreviewLoading = true;
+    try {
+      let status = await apiRequest("/api/catalog/status");
+      if (status.status === "not_started") {
+        status = await apiRequest("/api/catalog/index", { method: "POST" });
+      }
+
+      while (status.status === "indexing") {
+        await new Promise(function (resolve) { setTimeout(resolve, 1200); });
+        status = await apiRequest("/api/catalog/status");
+      }
+
+      if (status.status !== "ready" || activePage !== "home" || playerOpen) return;
+
+      const categoryResult = await apiRequest("/api/catalog/categories?type=live");
+      const categories = Array.isArray(categoryResult.categories)
+        ? categoryResult.categories : [];
+      if (!categories.length || activePage !== "home" || playerOpen) return;
+
+      const category = String(categories[0].category || "Outros");
+      const query = "?type=live&category=" + encodeURIComponent(category)
+        + "&page=1&limit=40&all=1";
+      const itemResult = await apiRequest("/api/catalog/items" + query);
+      const items = Array.isArray(itemResult.items) ? itemResult.items : [];
+      if (!items.length || activePage !== "home" || playerOpen) return;
+
+      const first = items[0];
+      const itemId = Number(first.id);
+      if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
+
+      playerChannelContext = {
+        page: "live",
+        category: category,
+        type: "live",
+        pageNumber: 1,
+        items: items,
+        total: items.length,
+        limit: items.length || 1,
+        index: 0
+      };
+
+      openPlayer(itemId, String(first.title || "TV ao vivo"), 0, "mini");
+    } catch (error) {
+      console.warn("Não foi possível iniciar a prévia da TV ao vivo:", error);
+    } finally {
+      homePreviewLoading = false;
+    }
+  }
+
+  function renderPlaylistItems() {
+    const list = document.getElementById("playlist-items");
+    if (!list) return;
+
+    if (!playlists.length) {
+      list.innerHTML = "<p class='empty-message'>Nenhuma playlist cadastrada.</p>";
+      return;
+    }
+
+    list.innerHTML = playlists.map(function (item) {
+      const isDefault = Number(item.is_default) === 1;
+      const type = item.playlist_type === "xtream" ? "Xtream Codes" : "M3U";
+      return `
+        <article class="playlist-item">
+          <div class="playlist-info">
+            <strong>${escapeHTML(item.name)}</strong>
+            <span>${type} · ${isDefault ? "Lista padrão" : "Disponível"}</span>
+          </div>
+          <div class="playlist-actions">
+            ${isDefault ? "<span class='default-label'>SELECIONADA</span>" :
+              `<button class="small-button" data-action="select" data-id="${Number(item.id)}">Selecionar lista</button>`}
+            <button class="small-button danger-button" data-action="delete" data-id="${Number(item.id)}">Excluir</button>
+          </div>
+        </article>
+      `;
+    }).join("");
+
+    list.querySelectorAll("button[data-action]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        const id = Number(this.dataset.id);
+        if (this.dataset.action === "select") selectPlaylist(id);
+        if (this.dataset.action === "delete") deletePlaylist(id);
+      });
+    });
+  }
+
+  async function addPlaylist() {
+    const name = document.getElementById("playlist-name").value.trim();
+    const type = document.getElementById("playlist-type").value;
+
+    if (!name) {
+      showMessage("Informe um nome para a playlist.", true);
+      return;
+    }
+
+    const data = { name: name, playlist_type: type };
+
+    if (type === "xtream") {
+      data.server_url = document.getElementById("xtream-server").value.trim();
+      data.username = document.getElementById("xtream-user").value.trim();
+      data.password = document.getElementById("xtream-password").value;
+    } else {
+      data.source_url = document.getElementById("m3u-url").value.trim();
+    }
+
+    try {
+      await apiRequest("/api/playlists", {
+        method: "POST",
+        body: JSON.stringify(data)
+      });
+      document.getElementById("playlist-name").value = "";
+      document.getElementById("xtream-server").value = "";
+      document.getElementById("xtream-user").value = "";
+      document.getElementById("xtream-password").value = "";
+      document.getElementById("m3u-url").value = "";
+      showMessage("Playlist cadastrada com sucesso.", false);
+      await loadPlaylists();
+    } catch (error) {
+      showMessage(error.message, true);
+    }
+  }
+
+  async function selectPlaylist(id) {
+    const buttons = Array.from(
+      document.querySelectorAll('button[data-action="select"]')
+    );
+    buttons.forEach(button => button.disabled = true);
+
+    const basePath = "/api/playlists/" + id + "/select";
+    showMessage("Iniciando seleção da playlist...", false);
+
+    try {
+      await apiRequest(basePath, { method: "PUT" });
+
+      let completed = false;
+
+      for (let attempt = 0; attempt < 900; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        const job = await apiRequest(basePath + "/status");
+        const status = String(job.status || "").toLowerCase();
+
+        if (status === "error" || job.success === false) {
+          throw new Error(job.message || "Falha ao selecionar a playlist.");
+        }
+
+        if (status === "ready" || job.success === true) {
+          completed = true;
+          showMessage(
+            job.message || "Playlist selecionada com sucesso.",
+            false
+          );
+          break;
+        }
+
+        let message = job.message || "Processando playlist...";
+        if (job.progress !== null && job.progress !== undefined) {
+          message += " " + Math.round(Number(job.progress) || 0) + "%";
+        }
+
+        if (job.received_bytes !== undefined) {
+          const received = Number(job.received_bytes) || 0;
+          const total = Number(job.total_bytes) || 0;
+          const mb = value => (value / 1048576).toFixed(1) + " MB";
+          message += total > 0
+            ? " · " + mb(received) + " / " + mb(total)
+            : " · " + mb(received);
+        }
+
+        showMessage(message, false);
+      }
+
+      if (!completed) {
+        throw new Error("A seleção demorou demais. Tente novamente.");
+      }
+
+      await loadPlaylists();
+    } catch (error) {
+      showMessage(error.message || "Erro ao selecionar a playlist.", true);
+    } finally {
+      buttons.forEach(button => button.disabled = false);
+    }
+  }
+
+  async function deletePlaylist(id) {
+    if (!confirm("Deseja realmente excluir esta playlist?")) return;
+
+    try {
+      await apiRequest("/api/playlists/" + id, { method: "DELETE" });
+      showMessage("Playlist excluída.", false);
+      await loadPlaylists();
+    } catch (error) {
+      showMessage(error.message, true);
+    }
+  }
+
+
+  let catalogViewToken = 0;
+  let catalogPollTimer = null;
+  let playerChannelContext = null;
+  let playerChannelBusy = false;
+  let playerChannelRequestToken = 0;
+
+  function catalogHeader(page) {
+    return `
+      <div class="catalog-header">
+        <span class="section-kicker">WILLARD IPTV</span>
+        <h2>${escapeHTML(pages[page][1])}</h2>
+        <p>Escolha uma categoria para explorar seu conteúdo.</p>
+      </div>
+    `;
+  }
+
+  function renderCatalogLoading(message, progress) {
+    const percent = Math.max(0, Math.min(100, Number(progress) || 0));
+    view.innerHTML = `
+      <div class="catalog-state">
+        <span class="section-kicker">PREPARANDO CATÁLOGO</span>
+        <h2>${escapeHTML(message)}</h2>
+        <div class="catalog-progress">
+          <div style="width:${percent}%"></div>
+        </div>
+        <p>${percent}% concluído</p>
+      </div>
+    `;
+  }
+
+  function renderCatalogError(message) {
+    view.innerHTML = `
+      <div class="catalog-state">
+        <span class="section-kicker">CATÁLOGO</span>
+        <h2>Não foi possível carregar o conteúdo</h2>
+        <p>${escapeHTML(message)}</p>
+        <button class="secondary-button" id="catalog-retry">Tentar novamente</button>
+      </div>
+    `;
+    document.getElementById("catalog-retry").addEventListener("click", function () {
+      loadCatalogPage(activePage);
+    });
+  }
+
+  async function loadCatalogPage(page) {
+    const token = ++catalogViewToken;
+
+    if (catalogPollTimer) {
+      clearTimeout(catalogPollTimer);
+      catalogPollTimer = null;
+    }
+
+    view.innerHTML = `
+      <div class="catalog-state">
+        <span class="section-kicker">WILLARD IPTV</span>
+        <h2>Conectando ao catálogo...</h2>
+      </div>
+    `;
+
+    try {
+      let status = await apiRequest("/api/catalog/status");
+      if (token !== catalogViewToken) return;
+
+      if (status.status === "not_started") {
+        status = await apiRequest("/api/catalog/index", { method: "POST" });
+      }
+
+      if (token !== catalogViewToken) return;
+
+      if (status.status === "indexing") {
+        renderCatalogLoading("Indexando sua playlist...", status.progress);
+        catalogPollTimer = setTimeout(function () {
+          pollCatalogStatus(page, token);
+        }, 1200);
+        return;
+      }
+
+      if (status.status === "error") {
+        renderCatalogError(status.message || "Falha na indexação.");
+        return;
+      }
+
+      if (status.status === "ready") {
+        await renderCatalogCategories(page, token);
+        return;
+      }
+
+      renderCatalogError(status.message || "Catálogo indisponível.");
+    } catch (error) {
+      if (token === catalogViewToken) renderCatalogError(error.message);
+    }
+  }
+
+  async function pollCatalogStatus(page, token) {
+    if (token !== catalogViewToken || activePage !== page) return;
+
+    try {
+      const status = await apiRequest("/api/catalog/status");
+      if (token !== catalogViewToken) return;
+
+      if (status.status === "indexing") {
+        renderCatalogLoading("Indexando sua playlist...", status.progress);
+        catalogPollTimer = setTimeout(function () {
+          pollCatalogStatus(page, token);
+        }, 1200);
+      } else if (status.status === "ready") {
+        await renderCatalogCategories(page, token);
+      } else {
+        renderCatalogError(status.message || "Não foi possível indexar a playlist.");
+      }
+    } catch (error) {
+      if (token === catalogViewToken) renderCatalogError(error.message);
+    }
+  }
+
+  async function renderCatalogCategories(page, token) {
+    try {
+      const result = await apiRequest(
+        "/api/catalog/categories?type=" + encodeURIComponent(page === "live" ? "live" : page)
+      );
+      if (token !== catalogViewToken) return;
+
+      const categories = result.categories || [];
+
+      if (page === "live") {
+        liveCategoryNav.innerHTML = categories.map(function (category) {
+          const name = String(category.category || "Outros");
+          const count = Number(category.item_count) || 0;
+          return `
+            <button type="button" class="catalog-category"
+              data-category="${escapeHTML(name)}">
+              <strong>${escapeHTML(name)}</strong>
+              <span>${count.toLocaleString("pt-BR")} canais</span>
+            </button>
+          `;
+        }).join("");
+        liveCategoryNav.hidden = false;
+
+        view.innerHTML = `
+          ${catalogHeader(page)}
+          <div class="live-screen-layout">
+            <div class="live-channel-panel">
+              <div id="catalog-results" class="catalog-results live-catalog-results">
+                <p class="catalog-placeholder">Carregando canais...</p>
+              </div>
+            </div>
+            <div class="live-player-column">
+              <div id="live-player-slot" class="live-player-slot"></div>
+              <div class="live-preview-panel">
+                <span class="section-kicker">TV AO VIVO</span>
+                <h3>Pré-visualizações</h3>
+              </div>
+            </div>
+          </div>
+        `;
+
+        liveCategoryNav.querySelectorAll(".catalog-category").forEach(function (button) {
+          button.addEventListener("click", function () {
+            loadCatalogItems("live", this.dataset.category, 1);
+          });
+        });
+
+        if (categories.length) {
+          const first = liveCategoryNav.querySelector(".catalog-category");
+          if (first) first.focus();
+          await loadCatalogItems("live", String(categories[0].category || "Outros"), 1);
+        } else {
+          liveCategoryNav.innerHTML =
+            "<p class='empty-message'>Nenhuma categoria de canais encontrada.</p>";
+        }
+        return;
+      }
+
+      if (page === "movies" || page === "series") {
+        liveCategoryNav.innerHTML = categories.map(function (category) {
+          const name = String(category.category || "Outros");
+          const count = Number(category.item_count) || 0;
+          const adult = page === "movies" && name === "Adultos";
+          const unit = page === "movies" ? "filmes" : "séries";
+
+          return `
+            <button type="button"
+              class="catalog-category${adult ? " adult-category" : ""}"
+              data-category="${escapeHTML(name)}">
+              <strong>${escapeHTML(name)}</strong>
+              <span>${count.toLocaleString("pt-BR")} ${unit}</span>
+            </button>
+          `;
+        }).join("");
+
+        liveCategoryNav.hidden = false;
+
+        view.innerHTML = `
+          ${catalogHeader(page)}
+          <div id="catalog-results" class="catalog-results catalog-media-results">
+            <p class="catalog-placeholder">Selecione uma categoria para visualizar os conteúdos.</p>
+          </div>
+        `;
+
+        liveCategoryNav.querySelectorAll(".catalog-category").forEach(function (button) {
+          button.addEventListener("click", function () {
+            loadCatalogItems(page, this.dataset.category, 1);
+          });
+        });
+
+        if (categories.length) {
+          const first = liveCategoryNav.querySelector(".catalog-category");
+          if (first) first.focus();
+          await loadCatalogItems(page, String(categories[0].category || "Outros"), 1);
+        } else {
+          liveCategoryNav.innerHTML =
+            "<p class='empty-message'>Nenhuma categoria encontrada.</p>";
+        }
+        return;
+      }
+
+      liveCategoryNav.hidden = true;
+      liveCategoryNav.innerHTML = "";
+
+      view.innerHTML = `
+        ${catalogHeader(page)}
+        <div class="catalog-category-heading">
+          <h3>Categorias</h3>
+          <span>${categories.length} categorias</span>
+        </div>
+        <div class="catalog-categories" id="catalog-categories">
+          ${categories.length ? categories.map(function (category) {
+            const name = String(category.category || "Outros");
+            const count = Number(category.item_count) || 0;
+            const adult = page === "movies" && name === "Adultos";
+            return `
+              <button class="catalog-category${adult ? " adult-category" : ""}"
+                data-category="${escapeHTML(name)}">
+                <strong>${escapeHTML(name)}</strong>
+                <span>${count.toLocaleString("pt-BR")} itens</span>
+              </button>
+            `;
+          }).join("") : "<p class='empty-message'>Nenhuma categoria encontrada.</p>"}
+        </div>
+        <div id="catalog-results" class="catalog-results">
+          <p class="catalog-placeholder">Selecione uma categoria para visualizar os conteúdos.</p>
+        </div>
+      `;
+
+      view.querySelectorAll(".catalog-category").forEach(function (button) {
+        button.addEventListener("click", function () {
+          loadCatalogItems(page, this.dataset.category, 1);
+        });
+      });
+    } catch (error) {
+      if (token === catalogViewToken) renderCatalogError(error.message);
+    }
+  }
+
+  let catalogSeriesToken = 0;
+
+  async function loadCatalogItems(page, category, pageNumber) {
+    const token = ++catalogViewToken;
+    ++catalogSeriesToken;
+    const results = document.getElementById("catalog-results");
+    if (!results) return;
+
+    const categoryButtons = (
+      page === "live" || page === "movies" || page === "series"
+    )
+      ? liveCategoryNav.querySelectorAll(".catalog-category")
+      : view.querySelectorAll(".catalog-category");
+    categoryButtons.forEach(function (button) {
+      button.classList.toggle("selected", button.dataset.category === category);
+    });
+
+    results.innerHTML = "<p class='catalog-placeholder'>Carregando conteúdo...</p>";
+
+    try {
+      if (page === "series") {
+        const query = "?category=" + encodeURIComponent(category);
+        const result = await apiRequest("/api/catalog/series" + query);
+        if (token !== catalogViewToken || activePage !== page) return;
+
+        const seriesItems = Array.isArray(result.series) ? result.series : [];
+        playerChannelContext = {
+          page: "series",
+          category: category,
+          type: "series",
+          pageNumber: 1,
+          items: [],
+          total: 0,
+          limit: 1,
+          index: -1
+        };
+
+        const itemMarkup = seriesItems.length
+          ? seriesItems.map(function (item, index) {
+              const title = escapeHTML(item.name);
+              const logo = typeof item.logo === "string" ? item.logo.trim() : "";
+              const count = Number(item.episode_count) || 0;
+              return `
+                <button type="button" class="catalog-item catalog-poster-card catalog-series-card"
+                  data-series-index="${index}"
+                  aria-label="Abrir ${title}, ${count} episódios">
+                  <span class="catalog-poster">
+                    ${logo
+                      ? `<img src="${escapeHTML(logo)}" alt="${title}" loading="lazy">`
+                      : `<span class="catalog-poster-fallback">W</span>`}
+                  </span>
+                  <span class="catalog-item-info">
+                    <strong>${title}</strong>
+                    <span>${count.toLocaleString("pt-BR")} episódios</span>
+                  </span>
+                </button>
+              `;
+            }).join("")
+          : "<p class='empty-message'>Nenhuma série encontrada nesta categoria.</p>";
+
+        results.innerHTML = `
+          <div id="catalog-series-list">
+            <div class="catalog-results-heading">
+              <div>
+                <span class="section-kicker">SÉRIES</span>
+                <h3>${escapeHTML(category)}</h3>
+              </div>
+              <span>${seriesItems.length.toLocaleString("pt-BR")} séries</span>
+            </div>
+            <div class="catalog-poster-grid catalog-series-grid">${itemMarkup}</div>
+          </div>
+          <div id="catalog-series-detail" class="catalog-series-detail" style="display:none"></div>
+        `;
+
+        results.querySelectorAll(".catalog-series-card").forEach(function (button) {
+          let touchStartX = 0;
+          let touchStartY = 0;
+
+          button.addEventListener("touchstart", function (event) {
+            const touch = event.touches && event.touches[0];
+            if (!touch) return;
+            touchStartX = touch.clientX;
+            touchStartY = touch.clientY;
+          }, { passive: true });
+
+          button.addEventListener("touchend", function (event) {
+            const touch = event.changedTouches && event.changedTouches[0];
+            if (!touch) return;
+
+            const moved = Math.abs(touch.clientX - touchStartX) +
+              Math.abs(touch.clientY - touchStartY);
+            if (moved > 18) return;
+
+            event.preventDefault();
+            const item = seriesItems[Number(this.dataset.seriesIndex)];
+            if (item) selectCatalogSeries(category, item);
+          }, { passive: false });
+
+          button.addEventListener("click", function () {
+            if (Date.now() - (this._lastTouchOpen || 0) < 700) return;
+            const item = seriesItems[Number(this.dataset.seriesIndex)];
+            if (item) selectCatalogSeries(category, item);
+          });
+
+          button.addEventListener("touchend", function () {
+            this._lastTouchOpen = Date.now();
+          }, { passive: true });
+        });
+
+        results.querySelectorAll(".catalog-poster img").forEach(function (img) {
+          img.addEventListener("error", function () {
+            this.parentElement.classList.add("no-poster");
+            this.remove();
+          }, { once: true });
+        });
+        return;
+      }
+
+      const type = page === "live" ? "live" : page;
+      const query = "?type=" + encodeURIComponent(type)
+        + "&category=" + encodeURIComponent(category)
+        + "&page=1&limit=40&all=1";
+      const result = await apiRequest("/api/catalog/items" + query);
+      if (token !== catalogViewToken || activePage !== page) return;
+
+      const items = Array.isArray(result.items) ? result.items : [];
+
+      playerChannelContext = {
+        page: page,
+        category: category,
+        type: type,
+        pageNumber: 1,
+        items: items,
+        total: items.length,
+        limit: items.length || 1,
+        index: -1
+      };
+
+      const isVod = page === "movies";
+      const itemMarkup = items.length ? items.map(function (item, index) {
+        const title = escapeHTML(item.title);
+        const logo = typeof item.logo === "string" ? item.logo.trim() : "";
+        if (isVod) {
+          return `
+            <button type="button" class="catalog-item catalog-poster-card"
+              data-item-id="${Number(item.id)}"
+              aria-label="Reproduzir ${title}">
+              <span class="catalog-poster">
+                ${logo
+                  ? `<img src="${escapeHTML(logo)}" alt="${title}" loading="lazy">`
+                  : `<span class="catalog-poster-fallback">W</span>`}
+              </span>
+              <span class="catalog-item-info"><strong>${title}</strong></span>
+            </button>
+          `;
+        }
+
+        return `
+          <button type="button" class="catalog-item"
+            data-item-id="${Number(item.id)}"
+            aria-label="Reproduzir ${title}">
+            <span class="catalog-item-number">${index + 1}</span>
+            <span class="catalog-item-info">
+              <strong>${title}</strong>
+              <span>${escapeHTML(category)}</span>
+            </span>
+          </button>
+        `;
+      }).join("") : "<p class='empty-message'>Nenhum conteúdo nesta categoria.</p>";
+
+      const movieRowsMarkup = isVod && items.length
+        ? (itemMarkup.match(/<button[\s\S]*?<\/button>/g) || [])
+            .reduce(function (rows, card, index) {
+              const rowIndex = Math.floor(index / 7);
+              if (!rows[rowIndex]) rows[rowIndex] = [];
+              rows[rowIndex].push(card);
+              return rows;
+            }, [])
+            .map(function (row) {
+              return `<div class="catalog-movie-row">${row.join("")}</div>`;
+            }).join("")
+        : itemMarkup;
+
+      results.innerHTML = isVod ? `
+        <div class="catalog-results-heading">
+          <div>
+            <span class="section-kicker">CATEGORIA</span>
+            <h3>${escapeHTML(category)}</h3>
+          </div>
+          <span>${items.length.toLocaleString("pt-BR")} filmes</span>
+        </div>
+        <div class="catalog-movie-rows">${movieRowsMarkup}</div>
+      ` : `
+        <div class="catalog-results-heading">
+          <div>
+            <span class="section-kicker">CATEGORIA</span>
+            <h3>${escapeHTML(category)}</h3>
+          </div>
+          <span>${items.length.toLocaleString("pt-BR")} itens</span>
+        </div>
+        <div class="${page === "live" ? "catalog-live-list" : "catalog-item-list"}">
+          ${itemMarkup}
+        </div>
+      `;
+
+      results.querySelectorAll(".catalog-poster img").forEach(function (img) {
+        img.addEventListener("error", function () {
+          this.parentElement.classList.add("no-poster");
+          this.remove();
+        }, { once: true });
+      });
+
+      
+  // AUTO-PLAY DO PRIMEIRO CANAL (TV AO VIVO)
+  if (page === "live" && items && items.length > 0 && !playerOpen) {
+      const firstItem = items[0];
+      setTimeout(function() {
+          openPlayer(Number(firstItem.id), firstItem.name, 0);
+      }, 500); // Pequeno delay para a tela renderizar
+  }
+  
+  results.querySelectorAll(".catalog-item").forEach(function (item, index) {
+        item.addEventListener("click", function () {
+          openPlayer(
+            Number(this.dataset.itemId),
+            this.querySelector(".catalog-item-info strong").textContent,
+            index
+          );
+        });
+      });
+    } catch (error) {
+      if (token === catalogViewToken) {
+        results.innerHTML = `<p class="empty-message">${escapeHTML(error.message)}</p>`;
+      }
+    }
+  }
+
+  async function selectCatalogSeries(category, series, selectedSeason) {
+    const token = ++catalogSeriesToken;
+    const detail = document.getElementById("catalog-series-detail");
+    const seriesList = document.getElementById("catalog-series-list");
+    if (!detail || !seriesList) return;
+
+    seriesList.style.display = "none";
+    detail.style.display = "block";
+
+    const seasons = Array.isArray(series.seasons) ? series.seasons : [];
+    if (!seasons.length) {
+      detail.innerHTML = "<p class='empty-message'>Não foram encontradas temporadas para esta série.</p>";
+      return;
+    }
+
+    const seasonNumber = selectedSeason === undefined
+      ? Number(seasons[0].number)
+      : Number(selectedSeason);
+
+    detail.innerHTML = `
+      <button type="button" class="series-back-button" id="catalog-series-back">← Voltar às séries</button>
+      <div class="series-detail-heading">
+        <div>
+          <span class="section-kicker">SÉRIE SELECIONADA</span>
+          <h3>${escapeHTML(series.name)}</h3>
+        </div>
+        <span>${Number(series.episode_count || 0).toLocaleString("pt-BR")} episódios</span>
+      </div>
+      <div class="series-season-list" aria-label="Temporadas">
+        ${seasons.map(function (season) {
+          const number = Number(season.number);
+          return `
+            <button type="button"
+              class="series-season-button${number === seasonNumber ? " selected" : ""}"
+              data-season="${number}">
+              Temporada ${number}
+              <span>${Number(season.episode_count || 0)} eps.</span>
+            </button>
+          `;
+        }).join("")}
+      </div>
+      <div id="catalog-series-episodes" class="catalog-series-episodes">
+        <p class="catalog-placeholder">Carregando episódios...</p>
+      </div>
+    `;
+
+    detail.querySelector("#catalog-series-back").addEventListener("click", function () {
+      ++catalogSeriesToken;
+      detail.style.display = "none";
+      seriesList.style.display = "";
+    });
+
+    detail.querySelectorAll(".series-season-button").forEach(function (button) {
+      button.addEventListener("click", function () {
+        selectCatalogSeries(category, series, Number(this.dataset.season));
+      });
+    });
+
+    try {
+      const query = "?category=" + encodeURIComponent(category)
+        + "&name=" + encodeURIComponent(series.name)
+        + "&season=" + encodeURIComponent(seasonNumber);
+      const result = await apiRequest("/api/catalog/series/episodes" + query);
+      if (token !== catalogSeriesToken || !detail.isConnected) return;
+
+      const episodes = Array.isArray(result.episodes) ? result.episodes : [];
+      const episodeContainer = document.getElementById("catalog-series-episodes");
+      if (!episodeContainer) return;
+
+      if (playerChannelContext && playerChannelContext.page === "series") {
+        playerChannelContext.category = category;
+        playerChannelContext.type = "series";
+        playerChannelContext.items = episodes;
+        playerChannelContext.total = episodes.length;
+        playerChannelContext.limit = episodes.length || 1;
+        playerChannelContext.index = -1;
+      }
+
+      episodeContainer.innerHTML = episodes.length ? `
+        <div class="series-episodes-heading">
+          <h4>Temporada ${seasonNumber}</h4>
+          <span>${episodes.length} episódios</span>
+        </div>
+        <div class="series-episode-carousel">
+          ${episodes.map(function (episode, index) {
+            const title = escapeHTML(episode.episode_title || ("Episódio " + episode.episode));
+            const logo = typeof episode.logo === "string" ? episode.logo.trim() : "";
+            return `
+              <button type="button" class="series-episode-card" data-episode-index="${index}">
+                <span class="series-episode-poster">
+                  ${logo
+                    ? `<img src="${escapeHTML(logo)}" alt="" loading="lazy">`
+                    : `<span class="catalog-poster-fallback">▶</span>`}
+                  <span class="series-episode-play">▶</span>
+                </span>
+                <span class="series-episode-info">
+                  <strong>E${String(episode.episode).padStart(2, "0")} · ${title}</strong>
+                </span>
+              </button>
+            `;
+          }).join("")}
+        </div>
+      ` : "<p class='empty-message'>Nenhum episódio encontrado nesta temporada.</p>";
+
+      episodeContainer.querySelectorAll(".series-episode-card").forEach(function (button) {
+        button.addEventListener("click", function () {
+          const index = Number(this.dataset.episodeIndex);
+          const episode = episodes[index];
+          if (!episode) return;
+          openPlayer(Number(episode.id), episode.title, index);
+        });
+      });
+
+      episodeContainer.querySelectorAll("img").forEach(function (img) {
+        img.addEventListener("error", function () {
+          this.remove();
+        }, { once: true });
+      });
+    } catch (error) {
+      if (token === catalogSeriesToken) {
+        const episodeContainer = document.getElementById("catalog-series-episodes");
+        if (episodeContainer) {
+          episodeContainer.innerHTML = `<p class="empty-message">${escapeHTML(error.message)}</p>`;
+        }
+      }
+    }
+  }
+
+
+  function ensurePlayerOverlay() {
+    if (playerOverlay) return;
+
+    playerOverlay = document.createElement("section");
+    playerOverlay.id = "willard-player";
+    playerOverlay.className = "willard-player";
+    playerOverlay.hidden = true;
+    playerOverlay.setAttribute("role", "dialog");
+    playerOverlay.setAttribute("aria-modal", "true");
+
+    playerOverlay.innerHTML = `
+      <header class="player-topbar">
+        <div>
+          <span class="section-kicker">WILLARD IPTV</span>
+          <h2 id="player-title">Reprodução</h2>
+        </div>
+        <button type="button" id="player-close" class="player-button">
+          Fechar ✕
+        </button>
+      </header>
+      <div class="player-stage">
+        <video id="player-video" controls playsinline></video>
+        <div id="player-status" class="player-status">
+          Preparando reprodução...
+        </div>
+      </div>
+      <footer class="player-controls">
+        <button type="button" id="player-channel-prev"
+          class="player-button player-channel-button">
+          ◀ Anterior
+        </button>
+        <button type="button" id="player-toggle" class="player-button">
+          Pausar / Reproduzir
+        </button>
+        <button type="button" id="player-channel-next"
+          class="player-button player-channel-button">
+          Próximo ▶
+        </button>
+        <button type="button" id="player-back" class="player-button">
+          Voltar
+        </button>
+      </footer>
+    `;
+
+    document.body.appendChild(playerOverlay);
+
+    playerVideo = document.getElementById("player-video");
+
+    document.getElementById("player-close").addEventListener("click", closePlayer);
+    document.getElementById("player-back").addEventListener("click", handlePlayerBack);
+    document.getElementById("player-toggle").addEventListener("click", togglePlayer);
+    document.getElementById("player-channel-prev").addEventListener(
+      "click", function () { changePlayerChannel(-1); }
+    );
+    document.getElementById("player-channel-next").addEventListener(
+      "click", function () { changePlayerChannel(1); }
+    );
+  }
+
+  function playerMessage(message) {
+    const status = document.getElementById("player-status");
+    if (!status) return;
+    status.textContent = message;
+    status.hidden = false;
+  }
+
+
+  function updateAVPlayDisplayRect() {
+    if (playerMode !== "avplay" || !window.webapis ||
+        !window.webapis.avplay || !playerOverlay) return;
+
+    const applyRect = function () {
+      if (!playerOpen || playerMode !== "avplay") return;
+      try {
+        const rect = playerOverlay.querySelector(".player-stage").getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        window.webapis.avplay.setDisplayRect(
+          Math.round(rect.left * 1920 / window.innerWidth),
+          Math.round(rect.top * 1080 / window.innerHeight),
+          Math.round(rect.width * 1920 / window.innerWidth),
+          Math.round(rect.height * 1080 / window.innerHeight)
+        );
+      } catch (_) {}
+    };
+
+    requestAnimationFrame(function () {
+      requestAnimationFrame(applyRect);
+    });
+  }
+
+  function setPlayerDisplayMode(mode) {
+    if (!playerOverlay) return;
+    playerDisplayMode = mode;
+
+    playerOverlay.classList.toggle("mini-mode", mode === "mini");
+    playerOverlay.classList.toggle("fullscreen-mode", mode === "fullscreen");
+  playerOverlay.classList.toggle("inline-mode", mode === "inline");
+  playerOverlay.classList.toggle("inline-mode", mode === "inline");
+
+    if (mode === "inline") {
+    const slot = document.getElementById("live-player-slot");
+    if (slot) {
+      slot.appendChild(playerOverlay);
+      playerOverlay.setAttribute("aria-modal", "false");
+    } else {
+      document.body.appendChild(playerOverlay); 
+    }
+  } else if (mode === "inline") {
+    const slot = document.getElementById("live-player-slot");
+    if (slot) {
+      slot.appendChild(playerOverlay);
+      playerOverlay.setAttribute("aria-modal", "false");
+    } else {
+      document.body.appendChild(playerOverlay); 
+    }
+  } else if (mode === "mini" && activePage === "home") {
+      hero.appendChild(playerOverlay);
+      hero.classList.add("has-home-player");
+      playerOverlay.classList.add("mini-home");
+      playerOverlay.classList.remove("mini-live");
+      playerOverlay.setAttribute("aria-modal", "false");
+    } else if (mode === "mini") {
+      document.body.appendChild(playerOverlay);
+      hero.classList.remove("has-home-player");
+      playerOverlay.classList.remove("mini-home");
+      playerOverlay.classList.add("mini-live");
+      playerOverlay.setAttribute("aria-modal", "false");
+    } else {
+      document.body.appendChild(playerOverlay);
+      hero.classList.remove("has-home-player");
+      playerOverlay.classList.remove("mini-home", "mini-live");
+      playerOverlay.setAttribute("aria-modal", "true");
+    }
+
+    updateAVPlayDisplayRect();
+  }
+
+  function handlePlayerBack() {
+    if (!playerOpen) return;
+
+    if (playerChannelContext &&
+        playerChannelContext.page === "live" &&
+        playerDisplayMode === "fullscreen") {
+      setPlayerDisplayMode("mini");
+      if (playerFullscreenReturnFocus &&
+          document.contains(playerFullscreenReturnFocus)) {
+        playerFullscreenReturnFocus.focus();
+      }
+      playerFullscreenReturnFocus = null;
+      return;
+    }
+
+    if (playerChannelContext &&
+        playerChannelContext.page === "live" &&
+        playerDisplayMode === "mini") {
+      if (activePage !== "home") openPage("home");
+      return;
+    }
+
+    closePlayer();
+  }
+
+  let mpegtsPlayer = null;
+
+  function destroyMpegtsPlayer() {
+    if (!mpegtsPlayer) return;
+    try { mpegtsPlayer.pause(); } catch (_) {}
+    try { mpegtsPlayer.unload(); } catch (_) {}
+    try { mpegtsPlayer.detachMediaElement(); } catch (_) {}
+    try { mpegtsPlayer.destroy(); } catch (_) {}
+    mpegtsPlayer = null;
+  }
+
+  function openPlayer(itemId, title, channelIndex, requestedMode) {
+    if (!Number.isSafeInteger(itemId) || itemId <= 0) return;
+
+    ensurePlayerOverlay();
+
+    if (playerOpen && currentPlayerItemId === itemId &&
+        playerDisplayMode === "mini") {
+      playerFullscreenReturnFocus = document.activeElement;
+      setPlayerDisplayMode("fullscreen");
+      return;
+    }
+
+    destroyMpegtsPlayer();
+
+    if (!playerOpen) {
+      playerReturnFocus = document.activeElement;
+    }
+
+    if (playerChannelContext && Number.isInteger(channelIndex) &&
+        channelIndex >= 0) {
+      playerChannelContext.index = channelIndex;
+    }
+
+    const isLive = !!(playerChannelContext &&
+                      playerChannelContext.page === "live");
+    let displayMode = requestedMode; if (!displayMode) { if (isLive) { displayMode = (activePage === "live") ? "inline" : "mini"; } else { displayMode = "fullscreen"; } }
+
+    playerOpen = true;
+    currentPlayerItemId = itemId;
+    playerMode = "";
+    const token = ++playerRequestToken;
+
+    playerOverlay.hidden = false;
+    playerOverlay.classList.remove("avplay-mode");
+    playerOverlay.classList.add("html5-mode");
+    setPlayerDisplayMode(displayMode);
+
+    document.getElementById("player-title").textContent = title || "Reprodução";
+    playerVideo.style.display = "none";
+    playerVideo.pause();
+    playerVideo.removeAttribute("src");
+    playerVideo.load();
+    playerMessage("Obtendo conteúdo...");
+
+    if (displayMode === "fullscreen") {
+      document.getElementById("player-close").focus();
+    }
+
+    apiRequest("/api/catalog/items/" + itemId + "/stream")
+      .then(function (result) {
+        if (!playerOpen || token !== playerRequestToken) return;
+
+        if (!result || typeof result.proxy_url !== "string" ||
+            !/^\/api\/catalog\/items\/\d+\/proxy$/.test(result.proxy_url)) {
+          throw new Error("Endereço de reprodução inválido.");
+        }
+
+        const proxyUrl = new URL(result.proxy_url, apiUrl).toString();
+        const avplay = window.webapis && window.webapis.avplay;
+
+        if (avplay) {
+          playerMode = "avplay";
+          playerOverlay.classList.remove("html5-mode");
+          playerOverlay.classList.add("avplay-mode");
+          playerVideo.style.display = "none";
+          playerMessage("Conectando ao servidor de vídeo...");
+
+          try {
+            try { avplay.stop(); } catch (_) {}
+            try { avplay.close(); } catch (_) {}
+
+            avplay.open(proxyUrl);
+
+            const stage = playerOverlay.querySelector(".player-stage");
+            const rect = stage.getBoundingClientRect();
+            const scaleX = 1920 / window.innerWidth;
+            const scaleY = 1080 / window.innerHeight;
+
+            avplay.setDisplayRect(
+              Math.round(rect.left * scaleX),
+              Math.round(rect.top * scaleY),
+              Math.round(rect.width * scaleX),
+              Math.round(rect.height * scaleY)
+            );
+
+            avplay.setListener({
+              onbufferingstart: function () {
+                if (playerOpen) playerMessage("Carregando vídeo...");
+              },
+              onbufferingcomplete: function () {
+                if (playerOpen) {
+                  document.getElementById("player-status").hidden = true;
+                }
+              },
+              onstreamcompleted: function () {
+                if (playerOpen) playerMessage("Reprodução finalizada.");
+              },
+              onerror: function () {
+                if (playerOpen) playerMessage("Não foi possível reproduzir este conteúdo.");
+              }
+            });
+
+            avplay.prepareAsync(
+              function () {
+                if (!playerOpen || token !== playerRequestToken) return;
+                try {
+                  avplay.play();
+                  document.getElementById("player-status").hidden = true;
+                } catch (_) {
+                  playerMessage("Não foi possível iniciar a reprodução.");
+                }
+              },
+              function () {
+                if (playerOpen && token === playerRequestToken) {
+                  playerMessage("Falha ao preparar o vídeo neste dispositivo.");
+                }
+              }
+            );
+          } catch (_) {
+            playerMessage("O player da TV não conseguiu abrir este conteúdo.");
+          }
+          return;
+        }
+
+        const isLive = !!(playerChannelContext &&
+          playerChannelContext.page === "live");
+
+        if (!isLive) {
+          playerMode = "html5";
+          playerOverlay.classList.remove("avplay-mode");
+          playerOverlay.classList.add("html5-mode");
+          playerVideo.style.display = "block";
+          playerMessage("Carregando filme ou episódio...");
+
+          playerVideo.onerror = function () {
+            if (playerOpen && token === playerRequestToken) {
+              const mediaError = playerVideo.error;
+              const errorCode = mediaError ? mediaError.code : 0;
+              const errorMessage = mediaError && mediaError.message
+                ? " - " + mediaError.message
+                : "";
+              playerMessage("Falha no vídeo. Código: " + errorCode + errorMessage);
+            }
+          };
+
+          playerVideo.onplaying = function () {
+            if (playerOpen && token === playerRequestToken) {
+              document.getElementById("player-status").hidden = true;
+            }
+          };
+
+          playerVideo.src = proxyUrl;
+          playerVideo.load();
+
+          const playPromise = playerVideo.play();
+
+          if (playPromise && typeof playPromise.catch === "function") {
+            playPromise.catch(function () {
+              if (playerOpen && token === playerRequestToken) {
+                playerMessage("Toque em Reproduzir para iniciar o vídeo.");
+              }
+            });
+          }
+          return;
+        }
+
+        if (!window.mpegts || !window.mpegts.isSupported()) {
+          throw new Error("Reprodução MPEG-TS não suportada neste navegador.");
+        }
+
+        playerMode = "mpegts";
+        playerOverlay.classList.remove("avplay-mode");
+        playerOverlay.classList.add("html5-mode");
+        playerVideo.style.display = "block";
+        playerMessage("Conectando e carregando transmissão...");
+
+        mpegtsPlayer = window.mpegts.createPlayer({
+          type: "mpegts",
+          isLive: true,
+          url: proxyUrl
+        });
+
+        mpegtsPlayer.attachMediaElement(playerVideo);
+
+        mpegtsPlayer.on(window.mpegts.Events.ERROR, function () {
+          if (playerOpen && token === playerRequestToken) {
+            playerMessage("Falha na transmissão. Verifique a conexão ou tente outro canal.");
+          }
+        });
+
+        playerVideo.addEventListener("playing", function onPlaying() {
+          playerVideo.removeEventListener("playing", onPlaying);
+          if (playerOpen && token === playerRequestToken) {
+            document.getElementById("player-status").hidden = true;
+          }
+        });
+
+        mpegtsPlayer.load();
+        const playPromise = mpegtsPlayer.play();
+
+        if (playPromise && typeof playPromise.catch === "function") {
+          playPromise.catch(function () {
+            if (playerOpen && token === playerRequestToken) {
+              playerMessage("Toque em Reproduzir para iniciar o vídeo.");
+            }
+          });
+        }
+      })
+      .catch(function () {
+        if (playerOpen && token === playerRequestToken) {
+          playerMessage("Não foi possível obter ou reproduzir este conteúdo.");
+        }
+      });
+  }
+
+  async function changePlayerChannel(direction) {
+    if (!playerOpen || playerChannelBusy) return;
+
+    const context = playerChannelContext;
+    if (!context || !Array.isArray(context.items) ||
+        !context.items.length || context.index < 0) {
+      playerMessage("Lista de canais indisponível.");
+      return;
+    }
+
+    playerChannelBusy = true;
+    ++playerChannelRequestToken;
+
+    const previousButton = document.getElementById("player-channel-prev");
+    const nextButton = document.getElementById("player-channel-next");
+    if (previousButton) previousButton.disabled = true;
+    if (nextButton) nextButton.disabled = true;
+
+    try {
+      const items = context.items;
+      const targetIndex = (
+        context.index + direction + items.length
+      ) % items.length;
+
+      const item = items[targetIndex];
+      if (!item) {
+        playerMessage("Não foi possível localizar o canal.");
+        return;
+      }
+
+      context.index = targetIndex;
+      openPlayer(Number(item.id), item.title, targetIndex);
+    } catch (_) {
+      if (playerOpen) {
+        playerMessage("Falha ao trocar de canal. Tente novamente.");
+      }
+    } finally {
+      playerChannelBusy = false;
+      if (previousButton) previousButton.disabled = false;
+      if (nextButton) nextButton.disabled = false;
+    }
+  }
+
+  function togglePlayer() {
+    if (!playerOpen) return;
+
+    try {
+      if (playerMode === "avplay" && window.webapis && window.webapis.avplay) {
+        const avplay = window.webapis.avplay;
+        const state = avplay.getState();
+
+        if (state === "PLAYING") avplay.pause();
+        else if (state === "PAUSED") avplay.play();
+      } else if ((playerMode === "mpegts" || playerMode === "html5") && playerVideo) {
+        if (playerVideo.paused) {
+          const result = playerVideo.play();
+          if (result && result.catch) {
+            result.catch(function () {
+              playerMessage("Não foi possível iniciar a reprodução.");
+            });
+          }
+        } else {
+          playerVideo.pause();
+        }
+      }
+    } catch (_) {
+      playerMessage("Não foi possível controlar a reprodução.");
+    }
+  }
+
+  function seekPlayer(seconds) {
+    try {
+      if (playerMode === "avplay" && window.webapis && window.webapis.avplay) {
+        const avplay = window.webapis.avplay;
+        const current = avplay.getCurrentTime();
+        avplay.seekTo(
+          Math.max(0, current + seconds * 1000),
+          function () {},
+          function () {}
+        );
+      } else if (playerMode === "mpegts") {
+        return;
+      } else if (playerMode === "html5" && playerVideo &&
+                 Number.isFinite(playerVideo.duration)) {
+        playerVideo.currentTime = Math.max(
+          0,
+          Math.min(playerVideo.duration, playerVideo.currentTime + seconds)
+        );
+      }
+    } catch (_) {}
+  }
+
+  function closePlayer() {
+    if (!playerOpen) return;
+
+    playerOpen = false;
+    playerRequestToken++;
+    playerChannelRequestToken++;
+    playerChannelBusy = false;
+
+    if (playerMode === "avplay" && window.webapis && window.webapis.avplay) {
+      try { window.webapis.avplay.stop(); } catch (_) {}
+      try { window.webapis.avplay.close(); } catch (_) {}
+    }
+
+    destroyMpegtsPlayer();
+
+    if (playerVideo) {
+      try { playerVideo.pause(); } catch (_) {}
+      playerVideo.removeAttribute("src");
+      try { playerVideo.load(); } catch (_) {}
+      playerVideo.style.display = "none";
+    }
+
+    playerMode = "";
+    currentPlayerItemId = 0;
+    playerDisplayMode = "";
+    playerFullscreenReturnFocus = null;
+    playerOverlay.hidden = true;
+    playerOverlay.classList.remove(
+      "avplay-mode", "html5-mode", "mini-mode",
+      "fullscreen-mode", "mini-home", "mini-live"
+    );
+    document.body.appendChild(playerOverlay);
+    hero.classList.remove("has-home-player");
+
+    if (playerReturnFocus && document.contains(playerReturnFocus)) {
+      playerReturnFocus.focus();
+    } else if (navItems[0]) {
+      navItems[0].focus();
+    }
+
+    playerReturnFocus = null;
+  }
+
+  function openPage(page) {
+    if (!pages[page]) return;
+
+    activePage = page;
+    pageLabel.textContent = pages[page][0];
+    sectionTitle.textContent = pages[page][1];
+
+    navItems.forEach(function (item) {
+      const selected = item.dataset.page === page;
+      item.classList.toggle("active", selected);
+      item.setAttribute("aria-current", selected ? "page" : "false");
+    });
+
+    const isHome = page === "home";
+    document.querySelector(".app").classList.toggle("home-mode", isHome);
+    document.querySelector(".app").classList.toggle("live-mode", page === "live");
+    document.querySelector(".app").classList.toggle(
+      "catalog-sidebar-mode", page === "movies" || page === "series"
+    );
+    liveCategoryNav.hidden = !(
+      page === "live" || page === "movies" || page === "series"
+    );
+    navigation.hidden = (
+      page === "live" || page === "movies" || page === "series"
+    );
+    bottomHint.hidden = !isHome;
+    hero.hidden = !isHome;
+    contentSection.hidden = !isHome;
+    view.hidden = isHome;
+
+    if (page === "playlists") {
+      catalogViewToken++;
+      if (catalogPollTimer) clearTimeout(catalogPollTimer);
+      renderPlaylistPage();
+    }
+
+    if (page === "live" || page === "movies" || page === "series") {
+      loadCatalogPage(page);
+    }
+
+    if (isHome) {
+      catalogViewToken++;
+      if (catalogPollTimer) clearTimeout(catalogPollTimer);
+      if (!playerOpen) startHomePreview();
+    }
+
+    if (playerOpen && playerDisplayMode === "mini") {
+      setPlayerDisplayMode("mini");
+    }
+  }
+
+  function activateCard(index) {
+    const destinations = ["live", "movies", "series", "playlists"];
+    if (destinations[index]) {
+      openPage(destinations[index]);
+      const selected = navItems.find(function (item) {
+        return item.dataset.page === destinations[index];
+      });
+      if (selected && destinations[index] !== "live") selected.focus();
+    }
+  }
+
+  navItems.forEach(function (item) {
+    item.addEventListener("click", function () {
+      openPage(item.dataset.page);
+    });
+  });
+
+  cards.forEach(function (card) {
+    card.addEventListener("click", function () {
+      activateCard(Number(card.dataset.index));
+    });
+  });
+
+  startButton.addEventListener("click", function () {
+    openPage("live");
+  });
+
+  function focusables() {
+    if (activePage === "home") return [startButton].concat(cards);
+
+    if (activePage === "live") {
+      return Array.from(liveCategoryNav.querySelectorAll(".catalog-category:not(:disabled)"))
+        .concat(Array.from(view.querySelectorAll("#catalog-results .catalog-item:not(:disabled)")));
+    }
+
+    if (activePage === "movies" || activePage === "series") {
+      return Array.from(liveCategoryNav.querySelectorAll(".catalog-category:not(:disabled)"))
+        .concat(Array.from(view.querySelectorAll(
+          "button:not(:disabled), input:not(:disabled), select:not(:disabled)"
+        )));
+    }
+
+    return navItems.concat(Array.from(view.querySelectorAll(
+      "button:not(:disabled), input:not(:disabled), select:not(:disabled)"
+    )));
+  }
+
+  function moveLiveFocus(key) {
+    const categories = Array.from(liveCategoryNav.querySelectorAll(".catalog-category:not(:disabled)"));
+    const channels = Array.from(view.querySelectorAll("#catalog-results .catalog-item:not(:disabled)"));
+    const active = document.activeElement;
+    const ci = categories.indexOf(active);
+    const vi = channels.indexOf(active);
+
+    if (ci >= 0) {
+      if (key === "ArrowUp" || key === "ArrowDown") {
+        const n = Math.max(0, Math.min(categories.length - 1, ci + (key === "ArrowDown" ? 1 : -1)));
+        categories[n].focus();
+      } else if (key === "ArrowRight" && channels.length) {
+        channels[0].focus();
+      }
+      return;
+    }
+
+    if (vi >= 0) {
+      if (key === "ArrowUp" || key === "ArrowDown") {
+        const n = Math.max(0, Math.min(channels.length - 1, vi + (key === "ArrowDown" ? 1 : -1)));
+        channels[n].focus();
+      } else if (key === "ArrowLeft") {
+        const selected = categories.find(function (item) {
+          return item.classList.contains("selected");
+        });
+        if (selected) selected.focus();
+      }
+      return;
+    }
+
+    if (categories.length) categories[0].focus();
+    else if (channels.length) channels[0].focus();
+  }
+
+  function movePosterFocus(key) {
+    const categories = Array.from(
+      liveCategoryNav.querySelectorAll(".catalog-category:not(:disabled)")
+    );
+    const posters = Array.from(
+      view.querySelectorAll("#catalog-results .catalog-poster-card:not(:disabled)")
+    );
+    const active = document.activeElement;
+
+    const categoryIndex = categories.indexOf(active);
+    const posterIndex = posters.indexOf(active);
+
+    if (categoryIndex >= 0) {
+      if (key === "ArrowUp" || key === "ArrowDown") {
+        const step = key === "ArrowDown" ? 1 : -1;
+        const next = Math.max(0, Math.min(categories.length - 1, categoryIndex + step));
+        if (categories[next]) categories[next].focus();
+      } else if (key === "ArrowRight" && posters.length) {
+        posters[0].focus();
+      }
+      return;
+    }
+
+    if (posterIndex >= 0) {
+      if (key === "ArrowLeft") {
+        const currentRect = active.getBoundingClientRect();
+        const firstColumn = posters.every(function (poster) {
+          return poster === active ||
+            poster.getBoundingClientRect().left >= currentRect.left - 2;
+        });
+
+        if (firstColumn) {
+          const selected = categories.find(function (button) {
+            return button.classList.contains("selected");
+          });
+          if (selected) selected.focus();
+          return;
+        }
+      }
+
+      const currentRect = active.getBoundingClientRect();
+      const currentX = currentRect.left + currentRect.width / 2;
+      const currentY = currentRect.top + currentRect.height / 2;
+
+      let best = null;
+      let bestScore = Infinity;
+
+      posters.forEach(function (candidate) {
+        if (candidate === active) return;
+
+        const rect = candidate.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        const dx = x - currentX;
+        const dy = y - currentY;
+
+        let primary;
+        let secondary;
+
+        if (key === "ArrowRight") {
+          if (dx <= 2) return;
+          primary = dx;
+          secondary = Math.abs(dy);
+        } else if (key === "ArrowLeft") {
+          if (dx >= -2) return;
+          primary = -dx;
+          secondary = Math.abs(dy);
+        } else if (key === "ArrowDown") {
+          if (dy <= 2) return;
+          primary = dy;
+          secondary = Math.abs(dx);
+        } else if (key === "ArrowUp") {
+          if (dy >= -2) return;
+          primary = -dy;
+          secondary = Math.abs(dx);
+        } else {
+          return;
+        }
+
+        const score = primary + secondary * 1.7;
+        if (score < bestScore) {
+          bestScore = score;
+          best = candidate;
+        }
+      });
+
+      if (best) best.focus();
+      return;
+    }
+
+    // Na tela de temporadas e episódios, mantém a navegação dos controles.
+    moveFocus(key);
+  }
+
+  function moveFocus(key) {
+    const elements = focusables();
+    const current = elements.indexOf(document.activeElement);
+    if (current < 0) {
+      if (elements[0]) elements[0].focus();
+      return;
+    }
+    let next = current;
+    if (key === "ArrowDown" || key === "ArrowRight") next = Math.min(current + 1, elements.length - 1);
+    else if (key === "ArrowUp" || key === "ArrowLeft") next = Math.max(current - 1, 0);
+    if (elements[next]) elements[next].focus();
+  }
+
+  document.addEventListener("keydown", function (event) {
+    if (playerOpen && playerDisplayMode === "mini") {
+      if (event.key === "Escape" || event.key === "Backspace" ||
+          event.keyCode === 10009) {
+        event.preventDefault();
+        handlePlayerBack();
+        return;
+      }
+
+      if (activePage === "live") {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp" ||
+            event.key === "ArrowLeft" || event.key === "ArrowRight") {
+          if (event.target.matches("input, select")) return;
+          event.preventDefault();
+          moveLiveFocus(event.key);
+          return;
+        }
+
+        if (event.key === "Enter") {
+          const element = document.activeElement;
+          if (element && typeof element.click === "function") {
+            event.preventDefault();
+            element.click();
+          }
+          return;
+        }
+      }
+    }
+
+    if (playerOpen && playerDisplayMode !== "mini") {
+      if (event.key === "Escape" || event.key === "Backspace" ||
+          event.keyCode === 10009) {
+        event.preventDefault();
+        handlePlayerBack();
+        return;
+      }
+
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        changePlayerChannel(-1);
+        return;
+      }
+
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        changePlayerChannel(1);
+        return;
+      }
+
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.preventDefault();
+        const controls = [
+          document.getElementById("player-close"),
+          document.getElementById("player-channel-prev"),
+          document.getElementById("player-toggle"),
+          document.getElementById("player-channel-next"),
+          document.getElementById("player-back")
+        ].filter(Boolean);
+        const current = controls.indexOf(document.activeElement);
+        const next = event.key === "ArrowDown"
+          ? Math.min(current + 1, controls.length - 1)
+          : Math.max(current - 1, 0);
+        controls[next].focus();
+        return;
+      }
+
+      if (event.key === "Enter") {
+        const element = document.activeElement;
+        if (element && typeof element.click === "function") {
+          event.preventDefault();
+          element.click();
+        }
+        return;
+      }
+
+      return;
+    }
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp" ||
+        event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      if (activePage !== "home" && event.target.matches("input, select")) return;
+      event.preventDefault();
+      if (activePage === "live") moveLiveFocus(event.key);
+      else if (activePage === "movies" || activePage === "series") {
+        movePosterFocus(event.key);
+      } else moveFocus(event.key);
+      return;
+    }
+
+    if (event.key === "Enter") {
+      const element = document.activeElement;
+      if (element && typeof element.click === "function" &&
+          !event.target.matches("input")) {
+        event.preventDefault();
+        element.click();
+      }
+      return;
+    }
+
+    if (event.key === "Escape" || event.key === "Backspace" ||
+        event.keyCode === 10009) {
+      event.preventDefault();
+      if (activePage !== "home") {
+        openPage("home");
+        startButton.focus();
+      }
+    }
+  });
+
+  document.querySelector(".app").classList.add("home-mode");
+  startButton.focus();
+})();

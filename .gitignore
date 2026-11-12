@@ -1,0 +1,16 @@
+# Backups e logs
+*.bak*
+*.tar.gz
+backups/
+tmp/
+*.log
+
+# Banco de dados local (não vamos subir o banco para não conflitar)
+server/data/willard.db
+server/data/
+__pycache__/
+*.pyc
+
+# Pastas de sistema
+.DS_Store
+node_modules/

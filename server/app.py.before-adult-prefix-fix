@@ -1,0 +1,918 @@
+import os
+import json
+import sqlite3
+import re
+import threading
+import urllib.request
+import urllib.parse
+import urllib.error
+from pathlib import Path
+from flask import Flask, request, jsonify, render_template_string
+
+BASE = Path(__file__).resolve().parent
+DATA = BASE / "data"
+DB = DATA / "willard.db"
+DATA.mkdir(exist_ok=True)
+
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
+
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if origin == "http://192.168.0.3:8080":
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Vary"] = "Origin"
+    return response
+
+
+def connect():
+    db = sqlite3.connect(DB)
+    db.row_factory = sqlite3.Row
+    return db
+
+
+def initialize():
+    with connect() as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS playlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                playlist_type TEXT NOT NULL,
+                server_url TEXT,
+                username TEXT,
+                password TEXT,
+                source_url TEXT,
+                file_path TEXT,
+                is_default INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS media_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                playlist_id INTEGER NOT NULL,
+                media_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                group_name TEXT,
+                title TEXT NOT NULL,
+                logo TEXT,
+                stream_url TEXT NOT NULL,
+                adult INTEGER DEFAULT 0
+            )
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_media_category
+            ON media_items(playlist_id, media_type, category, adult)
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_media_title
+            ON media_items(playlist_id, media_type, category, title COLLATE NOCASE)
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS catalog_meta (
+                playlist_id INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                file_mtime REAL NOT NULL,
+                item_count INTEGER NOT NULL,
+                indexed_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+
+@app.get("/")
+def home():
+    return render_template_string("""
+    <!doctype html>
+    <html lang="pt-br">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta charset="utf-8">
+    <title>Willard IPTV - Gerenciador</title>
+    <style>
+    body{background:#11111b;color:#eee;font:16px Arial;max-width:700px;
+    margin:30px auto;padding:16px}
+    h1{color:#a78bfa}
+    input,select,button{box-sizing:border-box;width:100%;padding:13px;
+    margin:7px 0;border-radius:7px;border:1px solid #444;
+    background:#222;color:white}
+    button{background:#7545c5;border:0;font-weight:bold}
+    .item{background:#222;padding:14px;margin:10px 0;border-radius:8px}
+    .muted{color:#aaa;font-size:13px}
+    </style>
+    <h1>WILLARD IPTV</h1>
+    <p class="muted">Gerenciador de playlists</p>
+    <form id="form">
+      <input name="name" placeholder="Nome da lista" required>
+      <select name="type" id="type">
+        <option value="xtream">Xtream Codes</option>
+        <option value="m3u_url">M3U por URL</option>
+      </select>
+      <div id="xtream">
+        <input name="server_url" placeholder="Endereço do servidor">
+        <input name="username" placeholder="Usuário">
+        <input name="password" placeholder="Senha" type="password">
+      </div>
+      <div id="m3u" hidden>
+        <input name="source_url" placeholder="URL da playlist M3U">
+      </div>
+      <button type="submit">Adicionar playlist</button>
+    </form>
+    <h2>Minhas listas</h2>
+    <div id="lists">Carregando...</div>
+    <script>
+    const headers = {"Content-Type":"application/json"};
+    const type = document.getElementById("type");
+    type.onchange = () => {
+      document.getElementById("xtream").hidden = type.value !== "xtream";
+      document.getElementById("m3u").hidden = type.value !== "m3u_url";
+    };
+    async function load(){
+      const r=await fetch("/api/playlists",{headers});
+      if(!r.ok){lists.textContent="Falha ao carregar playlists.";return}
+      const data=await r.json();
+      lists.innerHTML="";
+      data.playlists.forEach(p=>{
+        const div=document.createElement("div");
+        div.className="item";
+        const title=document.createElement("b");
+        title.textContent=p.name;
+        const info=document.createElement("p");
+        info.className="muted";
+        info.textContent=p.playlist_type+" · "+(p.is_default?"Padrão":"Salva");
+        const del=document.createElement("button");
+        del.textContent="Remover";
+        del.onclick=async()=>{
+          if(confirm("Remover esta playlist?")){
+            await fetch("/api/playlists/"+p.id,{method:"DELETE",headers});
+            load();
+          }
+        };
+        const def=document.createElement("button");
+        def.textContent="Definir como padrão";
+        def.onclick=async()=>{
+          await fetch("/api/playlists/"+p.id+"/default",{method:"PUT",headers});
+          load();
+        };
+        div.append(title,info,def,del);
+        lists.append(div);
+      });
+      if(!data.playlists.length) lists.textContent="Nenhuma playlist cadastrada.";
+    }
+    document.getElementById("form").onsubmit=async e=>{
+      e.preventDefault();
+      const f=new FormData(e.target);
+      const payload=Object.fromEntries(f.entries());
+      payload.playlist_type=payload.type;
+      delete payload.type;
+      const r=await fetch("/api/playlists",{method:"POST",headers,
+        body:JSON.stringify(payload)});
+      const result=await r.json();
+      if(!r.ok){alert(result.error||"Erro");return}
+      e.target.reset();load();
+      alert("Playlist cadastrada!");
+    };
+    load();
+    </script>
+    </html>
+    """)
+
+
+@app.get("/api/health")
+def health():
+    return jsonify({"application": "Willard IPTV Server", "status": "online"})
+
+
+@app.get("/api/playlists")
+def get_playlists():
+    with connect() as db:
+        rows = db.execute("""
+            SELECT id,name,playlist_type,server_url,username,
+                   source_url,file_path,is_default,created_at,updated_at
+            FROM playlists ORDER BY id
+        """).fetchall()
+    return jsonify({"playlists": [dict(r) for r in rows]})
+
+
+
+def validate_m3u(source):
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import urljoin, urlsplit
+    from urllib.request import Request, HTTPRedirectHandler, build_opener
+
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    try:
+        current = source
+        redirects = 0
+        opener = build_opener(NoRedirect())
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Connection": "close"
+        }
+
+        for attempt in range(3):
+            try:
+                for _ in range(6):
+                    parsed = urlsplit(current)
+                    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                        return False, "Redirecionamento para endereço inválido."
+
+                    req = Request(current, headers=headers, method="GET")
+                    try:
+                        response = opener.open(req, timeout=20)
+                    except HTTPError as exc:
+                        response = exc
+
+                    with response:
+                        status = response.code
+                        if status in (301, 302, 303, 307, 308):
+                            location = response.headers.get("Location")
+                            if not location or redirects >= 5:
+                                return False, "Limite de redirecionamentos excedido."
+                            current = urljoin(current, location)
+                            redirects += 1
+                            continue
+
+                        if status in (429,) or 500 <= status <= 599:
+                            raise RuntimeError("HTTP_TEMPORARIO")
+
+                        if status not in (200, 206):
+                            return False, "O provedor respondeu HTTP " + str(status) + "."
+
+                        body = response.read(65536)
+                        normalized = body.lstrip(b"\xef\xbb\xbf \t\r\n")
+
+                        if normalized.startswith(b"#EXTM3U"):
+                            return True, "Playlist M3U acessível e confirmada."
+
+                        if not normalized:
+                            return False, "O servidor respondeu sem enviar conteúdo."
+
+                        return False, "O endereço respondeu, mas não retornou o cabeçalho M3U."
+
+                return False, "Limite de redirecionamentos excedido."
+
+            except RuntimeError as exc:
+                if str(exc) != "HTTP_TEMPORARIO":
+                    return False, "Falha durante a validação da playlist."
+            except (URLError, TimeoutError, OSError):
+                if attempt == 2:
+                    return False, "Não foi possível estabelecer conexão com o provedor."
+            except Exception:
+                return False, "Falha inesperada durante a validação da playlist."
+
+            import time
+            time.sleep(1 + attempt)
+
+        return False, "Não foi possível validar a playlist após três tentativas."
+    except Exception:
+        return False, "Falha inesperada ao validar a playlist."
+
+
+def validate_xtream(server, username, password):
+    try:
+        parsed = urllib.parse.urlsplit(server)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return False, "Endereço do servidor Xtream inválido."
+
+        endpoint = server.rstrip("/") + "/player_api.php"
+        query = urllib.parse.urlencode({
+            "username": username,
+            "password": password
+        })
+        req = urllib.request.Request(
+            endpoint + "?" + query,
+            headers={"User-Agent": "Willard IPTV/1.0"}
+        )
+
+        with urllib.request.urlopen(req, timeout=15) as response:
+            raw = response.read(1024 * 1024 + 1)
+
+        if len(raw) > 1024 * 1024:
+            return False, "Resposta do servidor muito grande."
+
+        data = json.loads(raw.decode("utf-8-sig"))
+        info = data.get("user_info", {}) if isinstance(data, dict) else {}
+        auth = info.get("auth")
+
+        if str(auth) != "1" and auth is not True:
+            return False, "Usuário ou senha recusados pelo servidor IPTV."
+
+        status = str(info.get("status", "")).lower()
+        if status and status not in ("active", "enabled"):
+            return False, "A conta IPTV não está ativa."
+
+        return True, "Acesso Xtream Codes validado."
+
+    except Exception:
+        return False, "Não foi possível validar o acesso Xtream Codes."
+
+
+def download_m3u(playlist_id, source):
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(source)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False, "Endereço M3U inválido.", None
+
+    folder = DATA / "playlists"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    destination = folder / f"playlist_{playlist_id}.m3u"
+    temporary = None
+
+    try:
+        req = urllib.request.Request(
+            source,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/122.0 Safari/537.36"
+                ),
+                "Accept": "*/*",
+                "Connection": "close"
+            }
+        )
+
+        with urllib.request.urlopen(req, timeout=30) as response:
+            final_url = urlsplit(response.geturl())
+            if final_url.scheme not in ("http", "https") or not final_url.hostname:
+                return False, "Endereço de redirecionamento inválido.", None
+
+            if response.status != 200:
+                return False, "O provedor não disponibilizou a playlist.", None
+
+            temporary = folder / f".playlist_{playlist_id}.part"
+            total = 0
+            first = True
+
+            with temporary.open("wb") as output:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+
+                    total += len(chunk)
+                    if total > 512 * 1024 * 1024:
+                        raise ValueError("A playlist excede o limite de 512 MB.")
+
+                    if first:
+                        normalized = chunk.lstrip(b"\xef\xbb\xbf \t\r\n")
+                        if not normalized.startswith(b"#EXTM3U"):
+                            raise ValueError("O conteúdo recebido não é uma playlist M3U.")
+                        first = False
+
+                    output.write(chunk)
+
+            if total == 0 or first:
+                raise ValueError("O provedor retornou uma playlist vazia.")
+
+        os.replace(temporary, destination)
+        return True, "Playlist M3U baixada e validada.", str(destination)
+
+    except urllib.error.HTTPError as exc:
+        message = f"O provedor respondeu HTTP {exc.code}."
+    except urllib.error.URLError:
+        message = "Não foi possível conectar ao provedor M3U."
+    except TimeoutError:
+        message = "O tempo limite para baixar a playlist foi excedido."
+    except ValueError as exc:
+        message = str(exc)
+    except Exception:
+        message = "Falha durante o download da playlist."
+
+    if temporary and temporary.exists():
+        temporary.unlink()
+
+    return False, message, None
+
+
+@app.put("/api/playlists/<int:playlist_id>/select")
+def select_playlist(playlist_id):
+    with connect() as db:
+        playlist = db.execute(
+            "SELECT * FROM playlists WHERE id=?",
+            (playlist_id,)
+        ).fetchone()
+
+    if not playlist:
+        return jsonify({"error": "Playlist não encontrada."}), 404
+
+    kind = playlist["playlist_type"]
+    file_path = playlist["file_path"]
+
+    if kind == "m3u_url":
+        valid, message, file_path = download_m3u(
+            playlist_id, playlist["source_url"]
+        )
+        if not valid:
+            return jsonify({"error": message}), 502
+
+    elif kind == "xtream":
+        valid, message = validate_xtream(
+            playlist["server_url"],
+            playlist["username"],
+            playlist["password"]
+        )
+        if not valid:
+            return jsonify({"error": message}), 502
+
+    else:
+        return jsonify({"error": "Tipo de playlist não suportado."}), 400
+
+    with connect() as db:
+        exists = db.execute(
+            "SELECT id FROM playlists WHERE id=?",
+            (playlist_id,)
+        ).fetchone()
+
+        if not exists:
+            return jsonify({"error": "Playlist não encontrada."}), 404
+
+        db.execute("UPDATE playlists SET is_default=0")
+        db.execute("""
+            UPDATE playlists
+            SET is_default=1, file_path=?, updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+        """, (file_path, playlist_id))
+
+    return jsonify({
+        "success": True,
+        "id": playlist_id,
+        "playlist_type": kind,
+        "message": message
+    })
+
+
+@app.post("/api/playlists")
+def add_playlist():
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+    kind = data.get("playlist_type")
+
+    if not name:
+        return jsonify({"error": "Informe o nome da playlist"}), 400
+
+    if kind == "xtream":
+        server = str(data.get("server_url", "")).strip().rstrip("/")
+        username = str(data.get("username", "")).strip()
+        password = str(data.get("password", "")).strip()
+        if not all((server, username, password)):
+            return jsonify({"error": "Preencha servidor, usuário e senha"}), 400
+        values = (name, kind, server, username, password, None)
+    elif kind == "m3u_url":
+        source = str(data.get("source_url", "")).strip()
+        if not source.startswith(("http://", "https://")):
+            return jsonify({"error": "URL M3U inválida"}), 400
+        values = (name, kind, None, None, None, source)
+    else:
+        return jsonify({"error": "Tipo de playlist inválido"}), 400
+
+    with connect() as db:
+        cur = db.execute("""
+            INSERT INTO playlists
+            (name,playlist_type,server_url,username,password,source_url)
+            VALUES (?,?,?,?,?,?)
+        """, values)
+        playlist_id = cur.lastrowid
+
+    return jsonify({"success": True, "id": playlist_id}), 201
+
+
+@app.delete("/api/playlists/<int:playlist_id>")
+def delete_playlist(playlist_id):
+    with connect() as db:
+        cur = db.execute("DELETE FROM playlists WHERE id=?", (playlist_id,))
+    if not cur.rowcount:
+        return jsonify({"error": "Playlist não encontrada"}), 404
+    return jsonify({"success": True})
+
+
+@app.put("/api/playlists/<int:playlist_id>/default")
+def set_default(playlist_id):
+    with connect() as db:
+        exists = db.execute(
+            "SELECT id FROM playlists WHERE id=?", (playlist_id,)
+        ).fetchone()
+        if not exists:
+            return jsonify({"error": "Playlist não encontrada"}), 404
+        db.execute("UPDATE playlists SET is_default=0")
+        db.execute(
+            "UPDATE playlists SET is_default=1 WHERE id=?", (playlist_id,)
+        )
+    return jsonify({"success": True})
+
+
+
+# ============================================================
+# CATÁLOGO M3U - INDEXAÇÃO E CONSULTA PAGINADA
+# ============================================================
+
+_catalog_jobs = {}
+_catalog_jobs_lock = threading.Lock()
+_CATALOG_BATCH_SIZE = 1000
+
+
+def classify_m3u_group(group):
+    raw = (group or "").strip()
+    normalized = raw.casefold()
+
+    if normalized.startswith("canais |"):
+        return "live", raw.split("|", 1)[1].strip() or "Outros", 0
+
+    if normalized.startswith("filmes |"):
+        return "movies", raw.split("|", 1)[1].strip() or "Outros", 0
+
+    if normalized.startswith("series |"):
+        return "series", raw.split("|", 1)[1].strip() or "Outros", 0
+
+    if normalized.startswith("[xxx]"):
+        return "movies", "Adultos", 1
+
+    if normalized in ("novelas", "programas de tv"):
+        return "series", raw, 0
+
+    other_groups = {
+        "documentarios", "documentários", "cursos", "esportes",
+        "shows", "stand up comedy", "reels shorts"
+    }
+
+    if normalized in other_groups:
+        return "movies", "Outros", 0
+
+    return "movies", "Outros", 0
+
+
+def parse_m3u_extinf(line):
+    metadata, separator, title = line.partition(",")
+    if not separator:
+        title = metadata
+    attrs = dict(re.findall(r'([A-Za-z0-9_-]+)="([^"]*)"', metadata))
+    group = attrs.get("group-title", "").strip()
+    media_type, category, adult = classify_m3u_group(group)
+
+    return (
+        media_type,
+        category,
+        group,
+        title.strip() or attrs.get("tvg-name", "").strip() or "Sem título",
+        attrs.get("tvg-logo", "").strip(),
+        adult
+    )
+
+
+def catalog_job_update(playlist_id, **values):
+    with _catalog_jobs_lock:
+        current = _catalog_jobs.setdefault(playlist_id, {})
+        current.update(values)
+
+
+def index_m3u_catalog(playlist_id, file_path):
+    path = Path(file_path)
+
+    try:
+        if not path.is_file():
+            raise FileNotFoundError("Arquivo da playlist não encontrado.")
+
+        file_size = path.stat().st_size
+        file_mtime = path.stat().st_mtime
+
+        catalog_job_update(
+            playlist_id,
+            status="indexing",
+            progress=0,
+            indexed=0,
+            total_bytes=file_size,
+            message="Lendo playlist..."
+        )
+
+        db = connect()
+        count = 0
+        batch = []
+
+        try:
+            db.execute("BEGIN")
+            db.execute(
+                "DELETE FROM media_items WHERE playlist_id=?",
+                (playlist_id,)
+            )
+
+            pending = None
+            first_content = True
+            bytes_read = 0
+
+            with path.open("r", encoding="utf-8-sig", errors="replace") as source:
+                for raw_line in source:
+                    bytes_read += len(raw_line.encode("utf-8", errors="replace"))
+                    line = raw_line.strip()
+
+                    if not line:
+                        continue
+
+                    if first_content:
+                        first_content = False
+                        if not line.startswith("#EXTM3U"):
+                            raise ValueError("O arquivo não possui cabeçalho M3U válido.")
+                        continue
+
+                    if line.startswith("#EXTINF:"):
+                        pending = parse_m3u_extinf(line)
+                        continue
+
+                    if pending and not line.startswith("#"):
+                        media_type, category, group, title, logo, adult = pending
+
+                        batch.append((
+                            playlist_id,
+                            media_type,
+                            category,
+                            group,
+                            title,
+                            logo,
+                            line,
+                            adult
+                        ))
+                        pending = None
+
+                        if len(batch) >= _CATALOG_BATCH_SIZE:
+                            db.executemany("""
+                                INSERT INTO media_items
+                                (playlist_id,media_type,category,group_name,
+                                 title,logo,stream_url,adult)
+                                VALUES (?,?,?,?,?,?,?,?)
+                            """, batch)
+
+                            count += len(batch)
+                            batch.clear()
+
+                            catalog_job_update(
+                                playlist_id,
+                                indexed=count,
+                                progress=min(99, int(bytes_read * 100 / max(file_size, 1))),
+                                message=f"Indexando conteúdo: {count:,} itens"
+                            )
+
+            if first_content:
+                raise ValueError("A playlist está vazia.")
+
+            if batch:
+                db.executemany("""
+                    INSERT INTO media_items
+                    (playlist_id,media_type,category,group_name,
+                     title,logo,stream_url,adult)
+                    VALUES (?,?,?,?,?,?,?,?)
+                """, batch)
+                count += len(batch)
+
+            db.execute("""
+                INSERT OR REPLACE INTO catalog_meta
+                (playlist_id,file_path,file_size,file_mtime,item_count,indexed_at)
+                VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)
+            """, (playlist_id, str(path), file_size, file_mtime, count))
+
+            db.commit()
+
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+        catalog_job_update(
+            playlist_id,
+            status="ready",
+            progress=100,
+            indexed=count,
+            total=count,
+            message=f"Catálogo pronto: {count:,} itens."
+        )
+
+    except Exception:
+        catalog_job_update(
+            playlist_id,
+            status="error",
+            message="Não foi possível indexar a playlist. Verifique o arquivo M3U."
+        )
+
+
+def start_catalog_index(playlist_id, file_path):
+    path = Path(file_path)
+
+    if not path.is_file():
+        return {
+            "status": "error",
+            "message": "Arquivo da playlist não encontrado."
+        }
+
+    stat = path.stat()
+
+    with _catalog_jobs_lock:
+        current = _catalog_jobs.get(playlist_id, {})
+        if current.get("status") == "indexing":
+            return dict(current)
+
+    with connect() as db:
+        meta = db.execute("""
+            SELECT file_path,file_size,file_mtime,item_count
+            FROM catalog_meta WHERE playlist_id=?
+        """, (playlist_id,)).fetchone()
+
+    if (
+        meta
+        and meta["file_path"] == str(path)
+        and meta["file_size"] == stat.st_size
+        and meta["file_mtime"] == stat.st_mtime
+    ):
+        result = {
+            "status": "ready",
+            "progress": 100,
+            "indexed": meta["item_count"],
+            "total": meta["item_count"],
+            "message": "Catálogo já indexado."
+        }
+        catalog_job_update(playlist_id, **result)
+        return result
+
+    catalog_job_update(
+        playlist_id,
+        status="indexing",
+        progress=0,
+        indexed=0,
+        total_bytes=stat.st_size,
+        message="Preparando indexação..."
+    )
+
+    thread = threading.Thread(
+        target=index_m3u_catalog,
+        args=(playlist_id, str(path)),
+        daemon=True
+    )
+    thread.start()
+
+    return {
+        "status": "indexing",
+        "progress": 0,
+        "message": "Indexação iniciada."
+    }
+
+
+def get_active_m3u():
+    with connect() as db:
+        row = db.execute("""
+            SELECT id,file_path,playlist_type
+            FROM playlists WHERE is_default=1 LIMIT 1
+        """).fetchone()
+
+    if not row:
+        return None, "Nenhuma playlist está selecionada."
+
+    if row["playlist_type"] != "m3u_url":
+        return None, "O catálogo M3U ainda não está disponível para esta conexão."
+
+    if not row["file_path"]:
+        return None, "A playlist selecionada ainda não possui arquivo baixado."
+
+    return row, None
+
+
+@app.post("/api/catalog/index")
+def api_catalog_index():
+    playlist, error = get_active_m3u()
+    if error:
+        return jsonify({"error": error}), 409
+
+    result = start_catalog_index(
+        playlist["id"],
+        playlist["file_path"]
+    )
+    return jsonify(result)
+
+
+@app.get("/api/catalog/status")
+def api_catalog_status():
+    playlist, error = get_active_m3u()
+    if error:
+        return jsonify({"status": "unavailable", "message": error}), 409
+
+    playlist_id = playlist["id"]
+
+    with _catalog_jobs_lock:
+        job = _catalog_jobs.get(playlist_id)
+
+    if job:
+        return jsonify(dict(job))
+
+    with connect() as db:
+        meta = db.execute("""
+            SELECT item_count,file_path,file_size,file_mtime
+            FROM catalog_meta WHERE playlist_id=?
+        """, (playlist_id,)).fetchone()
+
+    if meta:
+        path = Path(playlist["file_path"])
+        if path.is_file():
+            stat = path.stat()
+            if (
+                meta["file_path"] == str(path)
+                and meta["file_size"] == stat.st_size
+                and meta["file_mtime"] == stat.st_mtime
+            ):
+                return jsonify({
+                    "status": "ready",
+                    "progress": 100,
+                    "indexed": meta["item_count"],
+                    "total": meta["item_count"],
+                    "message": "Catálogo pronto."
+                })
+
+    return jsonify({
+        "status": "not_started",
+        "progress": 0,
+        "message": "O catálogo ainda não foi indexado."
+    })
+
+
+@app.get("/api/catalog/categories")
+def api_catalog_categories():
+    playlist, error = get_active_m3u()
+    if error:
+        return jsonify({"error": error}), 409
+
+    media_type = request.args.get("type", "")
+    if media_type not in ("live", "movies", "series"):
+        return jsonify({"error": "Tipo de catálogo inválido."}), 400
+
+    with connect() as db:
+        rows = db.execute("""
+            SELECT category,COUNT(*) AS item_count
+            FROM media_items
+            WHERE playlist_id=? AND media_type=?
+            GROUP BY category
+            ORDER BY category COLLATE NOCASE
+        """, (playlist["id"], media_type)).fetchall()
+
+    return jsonify({"categories": [dict(row) for row in rows]})
+
+
+@app.get("/api/catalog/items")
+def api_catalog_items():
+    playlist, error = get_active_m3u()
+    if error:
+        return jsonify({"error": error}), 409
+
+    media_type = request.args.get("type", "")
+    category = request.args.get("category", "")
+    if media_type not in ("live", "movies", "series") or not category:
+        return jsonify({"error": "Informe o tipo e a categoria."}), 400
+
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+        limit = min(100, max(1, int(request.args.get("limit", "40"))))
+    except ValueError:
+        return jsonify({"error": "Paginação inválida."}), 400
+
+    offset = (page - 1) * limit
+
+    with connect() as db:
+        total = db.execute("""
+            SELECT COUNT(*) FROM media_items
+            WHERE playlist_id=? AND media_type=? AND category=?
+        """, (playlist["id"], media_type, category)).fetchone()[0]
+
+        rows = db.execute("""
+            SELECT id,title,logo,category
+            FROM media_items
+            WHERE playlist_id=? AND media_type=? AND category=?
+            ORDER BY title COLLATE NOCASE
+            LIMIT ? OFFSET ?
+        """, (playlist["id"], media_type, category, limit, offset)).fetchall()
+
+    return jsonify({
+        "items": [dict(row) for row in rows],
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "pages": (total + limit - 1) // limit
+    })
+
+
+
+initialize()
+
+if __name__ == "__main__":
+    print("\\n===== WILLARD IPTV SERVER =====")
+    print("Painel: http://0.0.0.0:8767")
+    print("Autenticação: desativada.")
+    app.run(host="0.0.0.0", port=8767, debug=False)
