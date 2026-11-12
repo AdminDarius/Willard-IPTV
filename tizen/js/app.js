@@ -2,7 +2,7 @@
   "use strict";
 
   const API_KEY = "willard_server_url";
-  const DEFAULT_API = "http://127.0.0.1:8767";
+  const DEFAULT_API = "https://willard-iptv.onrender.com";
   const navItems = Array.from(document.querySelectorAll(".nav-item"));
   const liveCategoryNav = document.getElementById("live-category-nav");
   const navigation = document.getElementById("navigation");
@@ -92,7 +92,7 @@
         <div class="server-controls">
           <input id="server-address" type="url"
             value="${escapeHTML(apiUrl)}"
-            placeholder="http://192.168.0.7:8767">
+            placeholder="https://willard-iptv.onrender.com">
           <button class="secondary-button" id="save-server">Conectar</button>
         </div>
         <div id="playlist-status" class="playlist-status">Aguardando conexão.</div>
